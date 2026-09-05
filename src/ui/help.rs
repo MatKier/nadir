@@ -170,9 +170,13 @@ fn content(app: &App) -> Vec<Line<'static>> {
     row(&mut l, "live", "fetched successfully, current");
     row(&mut l, "5s / 12m / 3h", "time since the last successful fetch");
     row(&mut l, "err", "the fetch failed and there's nothing to fall back on");
-    text(&mut l, "Colour: green live, amber aging or waiting, red failed or stale past");
-    text(&mut l, "15 minutes. TLE is the exception — it's only refetched every 12h,");
-    text(&mut l, "so it stays green to 24h and amber to 72h.");
+    text(&mut l, "Colour is judged against how often that feed refetches: green while");
+    text(&mut l, "at most two refreshes could have been missed, amber up to six, then");
+    text(&mut l, "red. Waiting and failed-with-nothing-cached also read amber and red.");
+    row(&mut l, "SWX", "refetches every 5m — green to 10m, amber to 30m");
+    row(&mut l, "AUR", "every 15m — green to 30m, amber to 90m");
+    row(&mut l, "LCH", "every 30m — green to 1h, amber to 3h");
+    row(&mut l, "TLE", "every 12h — green to 24h, amber to 72h");
     text(&mut l, "`r` refetches only the focused panel's feeds, without spending a");
     text(&mut l, "request on anything else.");
     blank(&mut l);

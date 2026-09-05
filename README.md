@@ -170,9 +170,11 @@ has gone stale, e.g. `space weather · 1m old`.
 **Status chips** (bottom left: `TLE` `SWX` `AUR` `LCH`) — each shows `wait`
 (nothing fetched yet this session), `live`, an age such as `5s` / `12m` since
 the last successful fetch, or `err` (failed with nothing to fall back on).
-Colour follows the same scale: green live, amber aging, red failed or stale
-past 15 minutes. `TLE` is the exception: refetched only every 12h, it stays
-green to 24h and amber to 72h.
+Colour is judged against how often that feed refetches: green while at most two
+refreshes could have been missed, amber up to six, red beyond. So `SWX` (every
+5m) is green to 10m and amber to 30m, `AUR` (15m) green to 30m and amber to 90m,
+`LCH` (30m) green to 1h and amber to 3h, and `TLE` (12h) green to 24h and amber
+to 72h.
 
 ## Data sources
 

@@ -84,19 +84,22 @@ impl<T> Source<T> {
         }
     }
 
-    /// A colour hint for the UI: 0 = good, 1 = aging, 2 = bad.
-    /// `Stale` under 15 minutes still reads as aging rather than bad — right
-    /// for a feed refetched every few minutes; [`Source::severity_with`]
-    /// lets a slower-moving source (e.g. a 12-hour element set) pick its own
-    /// thresholds instead.
-    pub fn severity(&self) -> u8 {
-        self.severity_with(Duration::ZERO, Duration::from_secs(15 * 60))
+    /// A colour hint for the UI: 0 = good, 1 = aging, 2 = bad, with the `Stale`
+    /// age thresholds derived from how often this source is actually refetched
+    /// — green while at most two refreshes could have been missed, amber up to
+    /// six. No single fixed threshold can serve every feed: 15 minutes means
+    /// "two refreshes late" for the 5-minute space weather poll and "still
+    /// early" for the 30-minute launch manifest, so a shared constant
+    /// necessarily libels one of them. [`Source::health`] demotes `Live` to
+    /// `Stale` after a second, so these thresholds — not the `Live` arm — are
+    /// what actually colours a chip.
+    pub fn severity_for(&self, every: Duration) -> u8 {
+        self.severity_with(2 * every, 6 * every)
     }
 
-    /// Like [`Source::severity`], but with the `Stale` age thresholds for
-    /// "still green" and "amber, not yet bad" given explicitly, so a source
-    /// that's only ever fetched every several hours doesn't read as
-    /// perpetually failing.
+    /// The `Stale` age thresholds for "still green" and "amber, not yet bad"
+    /// given explicitly. [`Source::severity_for`] is the usual way in, deriving
+    /// both from a feed's refresh interval; this is the primitive underneath.
     pub fn severity_with(&self, green_until: Duration, amber_until: Duration) -> u8 {
         match self.health() {
             Health::Live => 0,
@@ -147,19 +150,39 @@ mod tests {
         assert_eq!(src.severity_with(Duration::from_secs(24 * 3600), Duration::from_secs(72 * 3600)), 2);
     }
 
-    /// `severity()` is `severity_with` at the original 15-minute-amber
-    /// thresholds — this must keep holding for every other feed's chip to
-    /// stay unaffected by the TLE chip's own, more forgiving thresholds.
     #[test]
-    fn severity_matches_severity_with_default_thresholds() {
-        for age_secs in [0, 60, 14 * 60, 20 * 60, 3600, 100 * 3600] {
+    fn severity_for_is_good_until_two_intervals_could_have_been_missed() {
+        let every = Duration::from_secs(5 * 60);
+        let mut fresh: Source<()> = Source::default();
+        fresh.set_from_cache((), Duration::from_secs(9 * 60));
+        assert_eq!(fresh.severity_for(every), 0);
+        let mut late: Source<()> = Source::default();
+        late.set_from_cache((), Duration::from_secs(11 * 60));
+        assert_eq!(late.severity_for(every), 1);
+    }
+
+    #[test]
+    fn severity_for_is_bad_past_six_intervals() {
+        let mut src: Source<()> = Source::default();
+        src.set_from_cache((), Duration::from_secs(31 * 60));
+        assert_eq!(src.severity_for(Duration::from_secs(5 * 60)), 2);
+    }
+
+    /// The interval-derived rule must land on exactly the 24h/72h knees the
+    /// `TLE` chip carried before this became a rule — the guarantee that the
+    /// one chip already reporting feed health keeps behaving identically.
+    #[test]
+    fn severity_for_reproduces_the_element_sets_established_thresholds() {
+        let tle_ttl = Duration::from_secs(12 * 3600);
+        for &(age_h, want) in &[(1u64, 0u8), (23, 0), (25, 1), (71, 1), (73, 2)] {
             let mut src: Source<()> = Source::default();
-            src.set_from_cache((), Duration::from_secs(age_secs));
+            src.set_from_cache((), Duration::from_secs(age_h * 3600));
             assert_eq!(
-                src.severity(),
-                src.severity_with(Duration::ZERO, Duration::from_secs(15 * 60)),
-                "age {age_secs}s"
+                src.severity_for(tle_ttl),
+                src.severity_with(Duration::from_secs(24 * 3600), Duration::from_secs(72 * 3600)),
+                "age {age_h}h"
             );
+            assert_eq!(src.severity_for(tle_ttl), want, "age {age_h}h");
         }
     }
 }
