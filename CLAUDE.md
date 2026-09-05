@@ -69,9 +69,10 @@ focused panel's feed to refetch. The TLE task is the exception: it wakes on the
 `--offline` skips `spawn_fetch_tasks` entirely. `load_all_from_cache` runs
 either way, so panels warm-start from disk instead of sitting on a placeholder.
 
-Adding a feed touches five places: a `Feed<T>` constructor, a task fn, a
-`Notifiers` field, the chip list in `ui::status_bar`, and — if it is cached —
-`load_all_from_cache`.
+Adding a feed touches six places: a `Feed<T>` constructor, a task fn, a
+`Notifiers` field, the chip list in `ui::status_bar`, its refresh-interval
+constant next to `TLE_TTL` (the chip derives its colour thresholds from it),
+and — if it is cached — `load_all_from_cache`.
 
 ### Panels
 

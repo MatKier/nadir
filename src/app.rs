@@ -669,7 +669,14 @@ const TLE_KEY: &str = "tle";
 const WEATHER_KEY: &str = "weather";
 const LAUNCHES_KEY: &str = "launches";
 /// How long a cached element set is trusted before it's worth refetching.
-const TLE_TTL: Duration = Duration::from_secs(12 * 3600);
+pub(crate) const TLE_TTL: Duration = Duration::from_secs(12 * 3600);
+/// How often each timer-driven feed refetches. Named rather than inline
+/// because `ui::status_bar` derives each chip's colour thresholds from the
+/// interval it is judging — a chip that hardcodes its own knees drifts away
+/// from its feed's schedule the moment one of them is retuned.
+pub(crate) const WEATHER_INTERVAL: Duration = Duration::from_secs(5 * 60);
+pub(crate) const AURORA_INTERVAL: Duration = Duration::from_secs(15 * 60);
+pub(crate) const LAUNCHES_INTERVAL: Duration = Duration::from_secs(30 * 60);
 
 /// One network-backed dashboard field, tied together in one place: which
 /// `AppData` slot it publishes into, which cache key it persists under, and
@@ -886,7 +893,7 @@ fn tle_task(
 fn weather_task(http: reqwest::Client, cache: Cache, data: Arc<RwLock<AppData>>, notify: Arc<Notify>) {
     tokio::spawn(async move {
         let feed = Feed::<Indices>::weather();
-        let mut ticker = tokio::time::interval(Duration::from_secs(5 * 60));
+        let mut ticker = tokio::time::interval(WEATHER_INTERVAL);
         loop {
             tokio::select! {
                 _ = ticker.tick() => {}
@@ -908,7 +915,7 @@ fn weather_task(http: reqwest::Client, cache: Cache, data: Arc<RwLock<AppData>>,
 fn aurora_task(http: reqwest::Client, data: Arc<RwLock<AppData>>, notify: Arc<Notify>) {
     tokio::spawn(async move {
         let feed = Feed::<AuroraGrid>::aurora();
-        let mut ticker = tokio::time::interval(Duration::from_secs(15 * 60));
+        let mut ticker = tokio::time::interval(AURORA_INTERVAL);
         loop {
             tokio::select! {
                 _ = ticker.tick() => {}
@@ -931,7 +938,7 @@ fn launches_task(
     tokio::spawn(async move {
         let feed = Feed::<Launches>::launches();
         let guard = api::launches::rate_guard();
-        let mut ticker = tokio::time::interval(Duration::from_secs(30 * 60));
+        let mut ticker = tokio::time::interval(LAUNCHES_INTERVAL);
         // Set only when a `429` needs a shorter, targeted retry instead of
         // waiting out the normal 30-minute interval.
         let mut retry_at: Option<Instant> = None;

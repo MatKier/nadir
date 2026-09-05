@@ -221,18 +221,13 @@ fn status_bar(frame: &mut Frame, area: Rect, app: &App, data: &crate::app::AppDa
     let mut spans = vec![Span::raw(" ")];
     let mut width: u16 = 1;
     for (name, sev, text) in [
-        // The element set is only refetched every 12h, so it uses its own,
-        // much more forgiving thresholds — the default 15-minute one would
-        // leave this chip red almost all the time.
-        chip_with(
-            "TLE",
-            &data.tle,
-            std::time::Duration::from_secs(24 * 3600),
-            std::time::Duration::from_secs(72 * 3600),
-        ),
-        chip("SWX", &data.weather),
-        chip("AUR", &data.aurora),
-        chip("LCH", &data.launches),
+        // Each chip's thresholds come from its own feed's interval, so a feed
+        // refetching exactly on schedule reads green whether that schedule is
+        // five minutes or twelve hours — and amber genuinely means "late".
+        chip("TLE", &data.tle, crate::app::TLE_TTL),
+        chip("SWX", &data.weather, crate::app::WEATHER_INTERVAL),
+        chip("AUR", &data.aurora, crate::app::AURORA_INTERVAL),
+        chip("LCH", &data.launches, crate::app::LAUNCHES_INTERVAL),
     ] {
         let color = match sev {
             0 => Theme::NOMINAL,
@@ -323,20 +318,16 @@ fn fitting_hint(tiers: &[String], width: u16) -> Option<&str> {
         .map(String::as_str)
 }
 
-fn chip<T>(name: &'static str, src: &crate::source::Source<T>) -> (&'static str, u8, String) {
-    (name, src.severity(), chip_text(src))
-}
-
-/// Like [`chip`], but with the `Stale` age thresholds for green/amber given
-/// explicitly — for a source refetched far less often than the 15-minute
-/// default assumes.
-fn chip_with<T>(
+/// A status chip: label, colour severity, and text. The feed's refresh
+/// interval is a parameter because a chip's age is only meaningful relative to
+/// how often that feed is *supposed* to refresh (see
+/// [`crate::source::Source::severity_for`]).
+fn chip<T>(
     name: &'static str,
     src: &crate::source::Source<T>,
-    green_until: std::time::Duration,
-    amber_until: std::time::Duration,
+    every: std::time::Duration,
 ) -> (&'static str, u8, String) {
-    (name, src.severity_with(green_until, amber_until), chip_text(src))
+    (name, src.severity_for(every), chip_text(src))
 }
 
 fn chip_text<T>(src: &crate::source::Source<T>) -> String {
