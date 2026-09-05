@@ -11,7 +11,7 @@ use ratatui::Frame;
 
 use crate::app::{App, Panel};
 use crate::geo::GeoPoint;
-use crate::orbit::solar::{is_sunlit, terminator_polyline};
+use crate::orbit::solar::{terminator_polyline, SunGeometry, CIVIL_TWILIGHT_DEG};
 use crate::orbit::{SatState, Tracker};
 use crate::ui::panels::truncate;
 use crate::ui::{is_focused, panel_block, PadMarker, Theme};
@@ -49,20 +49,7 @@ pub fn draw(
         tr.ground_track(now, Duration::minutes(35), Duration::zero(), Duration::seconds(20))
     });
 
-    // Night-side stipple, sampled on a coarse mesh (cheap, and reads clearly).
-    let mut night = Vec::new();
-    let mut lon = x_bounds[0];
-    while lon <= x_bounds[1] {
-        let mut lat = y_bounds[0];
-        while lat <= y_bounds[1] {
-            let p = GeoPoint::new(lat.clamp(-90.0, 90.0), lon, 0.0);
-            if !is_sunlit(&p, now) {
-                night.push((lon, lat));
-            }
-            lat += 4.0;
-        }
-        lon += 4.0;
-    }
+    let (night, twilight) = night_wash(&grid, now);
 
     let terminator: Vec<(f64, f64)> = terminator_polyline(now, 240)
         .into_iter()
@@ -75,16 +62,28 @@ pub fn draw(
         .x_bounds(x_bounds)
         .y_bounds(y_bounds)
         .paint(move |ctx| {
-            ctx.draw(&Map {
-                resolution: MapResolution::High,
-                color: Theme::COAST,
+            // The night wash is a *background*, not a foreground overlay: it
+            // has to go on a `Block` grid, whose cells carry a bg colour
+            // (ratatui's `PatternGrid`, what `Braille` uses, only ever sets
+            // fg — see `CharGrid::apply_color_to_bg` upstream). Painted first
+            // and switched away from before the coastline, so the Braille
+            // coastline dots drawn next land on top of it rather than being
+            // recoloured by it the way a same-layer stipple would.
+            ctx.marker(Marker::Block);
+            ctx.draw(&Points {
+                coords: &twilight,
+                color: Theme::TWILIGHT,
             });
-
             ctx.draw(&Points {
                 coords: &night,
                 color: Theme::NIGHT,
             });
-            ctx.layer();
+
+            ctx.marker(Marker::Braille);
+            ctx.draw(&Map {
+                resolution: MapResolution::High,
+                color: Theme::COAST,
+            });
 
             ctx.draw(&Points {
                 coords: &terminator,
@@ -164,6 +163,35 @@ pub fn draw(
     frame.render_widget(canvas, area);
 }
 
+/// Night and civil-twilight cells of the map, one sample per canvas cell.
+///
+/// Sampled on the `Grid`'s own cell centres rather than a fixed lon/lat mesh:
+/// the wash is painted on a `Marker::Block` grid, whose resolution is exactly
+/// `(cols, rows)` cells (unlike `Braille`'s 2x4-dots-per-cell), so a mesh at
+/// any other spacing either leaves gaps between samples (coarser than a cell)
+/// or repaints the same cell for nothing (finer). Sampling the grid itself
+/// also means the follow-mode zoom — half the degrees per cell of the
+/// whole-world view — gets exactly as fine a wash as the whole-world view
+/// does, which a fixed-degree mesh could not offer both at once.
+fn night_wash(grid: &Grid, now: DateTime<Utc>) -> (Vec<(f64, f64)>, Vec<(f64, f64)>) {
+    let sun = SunGeometry::at(now);
+    let mut night = Vec::new();
+    let mut twilight = Vec::new();
+    for row in 0..grid.rows() {
+        let lat = grid.y_of(row).clamp(-90.0, 90.0);
+        for col in 0..grid.cols() {
+            let lon = grid.x_of(col);
+            let elevation = sun.elevation_deg(lat, lon);
+            if elevation <= CIVIL_TWILIGHT_DEG {
+                night.push((lon, lat));
+            } else if elevation <= 0.0 {
+                twilight.push((lon, lat));
+            }
+        }
+    }
+    (night, twilight)
+}
+
 fn draw_polyline(ctx: &mut Context<'_>, segments: &[Vec<GeoPoint>], color: Color) {
     for seg in segments {
         for w in seg.windows(2) {
@@ -232,6 +260,17 @@ impl Grid {
     /// Degrees of latitude spanned by one cell row.
     fn deg_per_row(&self) -> f64 {
         (self.y[1] - self.y[0]) / (self.rows() - 1) as f64
+    }
+
+    /// The y-coordinate at the top edge of cell row `row` — the inverse of
+    /// [`Grid::col_of`] along the other axis. Row 0 is the top of the canvas
+    /// (`y[1]`), matching ratatui's own `Painter::get_point`, which maps `y`
+    /// as `(top - y) * (rows - 1) / height`.
+    fn y_of(&self, row: u16) -> f64 {
+        if self.rows() < 2 {
+            return self.y[1];
+        }
+        self.y[1] - row as f64 * self.deg_per_row()
     }
 }
 
@@ -359,6 +398,43 @@ mod tests {
     fn col_of_degenerate_grid_is_zero() {
         assert_eq!(grid(1).col_of(5.0), 0);
         assert_eq!(grid(0).col_of(5.0), 0);
+    }
+
+    #[test]
+    fn y_of_maps_row_zero_to_the_top_and_the_last_row_to_the_bottom() {
+        let g = Grid { inner: Rect::new(0, 0, 1, 50), x: [-180.0, 180.0], y: [-90.0, 90.0] };
+        assert_eq!(g.y_of(0), 90.0);
+        assert_eq!(g.y_of(49), -90.0);
+    }
+
+    #[test]
+    fn y_of_degenerate_grid_is_the_top_bound() {
+        let one_row = Grid { inner: Rect::new(0, 0, 1, 1), x: [-180.0, 180.0], y: [-90.0, 90.0] };
+        assert_eq!(one_row.y_of(0), 90.0);
+        let no_rows = Grid { inner: Rect::new(0, 0, 1, 0), x: [-180.0, 180.0], y: [-90.0, 90.0] };
+        assert_eq!(no_rows.y_of(0), 90.0);
+    }
+
+    #[test]
+    fn night_wash_classifies_every_cell_at_most_once_and_covers_roughly_half_the_globe() {
+        use chrono::TimeZone;
+        let g = Grid { inner: Rect::new(0, 0, 72, 36), x: [-180.0, 180.0], y: [-90.0, 90.0] };
+        let t = Utc.with_ymd_and_hms(2026, 9, 4, 6, 0, 0).unwrap();
+        let (night, twilight) = night_wash(&g, t);
+
+        let total = usize::from(g.cols()) * usize::from(g.rows());
+        assert!(night.len() + twilight.len() <= total);
+
+        // No cell is classified as both: the two sets are disjoint.
+        let overlap = night.iter().filter(|p| twilight.contains(p)).count();
+        assert_eq!(overlap, 0);
+
+        // Full night plus twilight should sit somewhere around half the
+        // sampled cells — loosely, since twilight and the terminator's
+        // curvature both eat into the round number, but nowhere near "all"
+        // or "none" the way a broken sign or a stuck constant would produce.
+        let dark_fraction = (night.len() + twilight.len()) as f64 / total as f64;
+        assert!((0.3..0.7).contains(&dark_fraction), "dark fraction {dark_fraction}");
     }
 
     #[test]
