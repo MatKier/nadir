@@ -64,17 +64,45 @@ pub fn terminator_polyline(time: DateTime<Utc>, n: usize) -> Vec<GeoPoint> {
         .collect()
 }
 
+/// Solar elevation is at least this far below the horizon before it counts as
+/// full night rather than civil twilight — the map's night wash uses it to
+/// shade the two differently.
+pub const CIVIL_TWILIGHT_DEG: f64 = -6.0;
+
 /// Elevation of the Sun above the local horizon at `where_`, in degrees.
 /// Negative during night; below −6° is (at least) civil darkness.
 pub fn solar_elevation_deg(where_: &GeoPoint, time: DateTime<Utc>) -> f64 {
-    let sun = sun_ecef_unit(subsolar_point(time));
-    let up = radial_unit(where_.lat_deg, where_.lon_deg);
-    dot(up, sun).clamp(-1.0, 1.0).asin().to_degrees()
+    SunGeometry::at(time).elevation_deg(where_.lat_deg, where_.lon_deg)
 }
 
 /// Whether a surface point is in daylight (Sun above the geometric horizon).
 pub fn is_sunlit(where_: &GeoPoint, time: DateTime<Utc>) -> bool {
     solar_elevation_deg(where_, time) > 0.0
+}
+
+/// The Sun's direction frozen at one instant, for callers that ask
+/// [`solar_elevation_deg`]'s question at many points for the same `time` — the
+/// map's night wash, for one, samples every cell of the canvas grid up to four
+/// times a second. `subsolar_point` involves trig on the current time; doing
+/// it once per frame instead of once per sample point is the whole point of
+/// this type existing separately from the `solar_elevation_deg` free function.
+pub struct SunGeometry {
+    sun: [f64; 3],
+}
+
+impl SunGeometry {
+    /// Resolve the Sun's ECEF direction at `time`, once.
+    pub fn at(time: DateTime<Utc>) -> Self {
+        SunGeometry { sun: sun_ecef_unit(subsolar_point(time)) }
+    }
+
+    /// Elevation of the Sun above the local horizon at `(lat_deg, lon_deg)`,
+    /// in degrees — same definition as [`solar_elevation_deg`], just against
+    /// the Sun direction resolved by [`SunGeometry::at`] rather than `time`.
+    pub fn elevation_deg(&self, lat_deg: f64, lon_deg: f64) -> f64 {
+        let up = radial_unit(lat_deg, lon_deg);
+        dot(up, self.sun).clamp(-1.0, 1.0).asin().to_degrees()
+    }
 }
 
 #[cfg(test)]
@@ -119,5 +147,18 @@ mod tests {
         assert!(is_sunlit(&s, t));
         let antipode = GeoPoint::new(-s.lat_deg, s.lon_deg + 180.0, 0.0);
         assert!(!is_sunlit(&antipode, t));
+    }
+
+    #[test]
+    fn sun_geometry_agrees_with_solar_elevation_deg() {
+        // The frozen-Sun path must return exactly what the free function does
+        // — it's meant to be the same computation, just amortised across many
+        // points for one `time` rather than re-resolving the Sun each call.
+        let t = Utc.with_ymd_and_hms(2026, 9, 4, 6, 0, 0).unwrap();
+        let sun = SunGeometry::at(t);
+        for (lat, lon) in [(0.0, 0.0), (51.5, -0.1), (-33.9, 151.2), (89.0, 40.0)] {
+            let p = GeoPoint::new(lat, lon, 0.0);
+            assert_eq!(sun.elevation_deg(lat, lon), solar_elevation_deg(&p, t));
+        }
     }
 }

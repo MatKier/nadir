@@ -89,7 +89,8 @@ fn content(app: &App) -> Vec<Line<'static>> {
     row(&mut l, "dim line", "the past 35 minutes of ground track");
     row(&mut l, "circle", "the visibility footprint — where the satellite is above 0°");
     row(&mut l, "amber dots", "the day/night terminator");
-    row(&mut l, "dark stipple", "the night side of the Earth");
+    row(&mut l, "dark ground", "the night side of the Earth");
+    row(&mut l, "lighter band", "civil twilight — the Sun 0°–6° below the horizon");
     row(&mut l, "◉", "pad of the highlighted launch, with its provider, site and coordinates — see below");
     text(&mut l, "The map shows the whole world; `f` zooms it to a 180°×90° window");
     text(&mut l, "that follows the satellite, and `m` expands it to fill the screen.");

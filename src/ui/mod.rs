@@ -29,7 +29,11 @@ impl Theme {
     pub const SAT: Color = Color::Rgb(255, 240, 150);
     pub const TRACK_FUTURE: Color = Color::Rgb(120, 200, 240);
     pub const TRACK_PAST: Color = Color::Rgb(70, 100, 120);
-    pub const NIGHT: Color = Color::Rgb(40, 45, 70);
+    // Now painted as a solid cell background rather than sparse foreground
+    // dots (see ui::map), so both need to sit well below COAST's brightness
+    // or the coastline stops reading as land against them.
+    pub const NIGHT: Color = Color::Rgb(22, 26, 42);
+    pub const TWILIGHT: Color = Color::Rgb(38, 44, 66);
     pub const COAST: Color = Color::Rgb(80, 110, 120);
     pub const STATION: Color = Color::Rgb(120, 230, 150);
     pub const PAD: Color = Color::Rgb(235, 150, 215);
