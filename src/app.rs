@@ -139,6 +139,9 @@ pub struct App {
     /// `follow` is set, but it *survives* an `f` toggle, so turning follow back
     /// on returns to the level you left.
     pub zoom: usize,
+    /// Whether the map draws its layer of prominent-place labels (the `p`
+    /// key). Renderer state only — like `follow`/`zoom`, it isn't persisted.
+    pub places: bool,
     pub show_help: bool,
     /// Scroll offset within the help overlay, in lines; clamped against its
     /// content height at render time.
@@ -323,6 +326,7 @@ impl App {
             }
             KeyCode::Char('m') => self.map_fullscreen = !self.map_fullscreen,
             KeyCode::Char('f') => self.follow = !self.follow,
+            KeyCode::Char('p') => self.places = !self.places,
             // `=`/`_` so the binding fires whether or not shift is held.
             KeyCode::Char('+') | KeyCode::Char('=') => self.zoom_in(),
             KeyCode::Char('-') | KeyCode::Char('_') => self.zoom_out(),
@@ -631,6 +635,7 @@ pub async fn run(mut config: Config) -> Result<()> {
         // context; `f` zooms it to a window centred on the satellite.
         follow: false,
         zoom: 0,
+        places: false,
         show_help: false,
         help_scroll: 0,
         should_quit: false,
@@ -1061,6 +1066,7 @@ mod tests {
             map_fullscreen: false,
             follow: false,
             zoom: 0,
+            places: false,
             show_help: false,
             help_scroll: 0,
             should_quit: false,
@@ -1220,5 +1226,19 @@ mod tests {
         }
         assert!(app.follow);
         assert_eq!(app.zoom, crate::ui::MAX_ZOOM);
+    }
+
+    #[test]
+    fn p_toggles_place_labels_and_leaves_follow_and_zoom_alone() {
+        let mut app = test_app(Config::default());
+        assert!(!app.places, "the place layer is off until asked for");
+        press(&mut app, 'f');
+        press(&mut app, '+');
+        let (follow, zoom) = (app.follow, app.zoom);
+        press(&mut app, 'p');
+        assert!(app.places);
+        assert_eq!((app.follow, app.zoom), (follow, zoom), "`p` is orthogonal to the map view");
+        press(&mut app, 'p');
+        assert!(!app.places);
     }
 }

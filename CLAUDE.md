@@ -7,7 +7,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 ```sh
 cargo build --release
 cargo run -- --offline               # debug run; --offline makes zero network requests
-cargo test                           # 117 unit tests, all hermetic
+cargo test                           # 128 unit tests, all hermetic
 cargo test -- --ignored              # 3 live tests that hit Celestrak / WhereTheISS.at
 cargo test rank_by_name              # one test, by name substring
 cargo test --lib config::            # one module's tests

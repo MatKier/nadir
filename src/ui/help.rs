@@ -69,6 +69,7 @@ fn content(app: &App) -> Vec<Line<'static>> {
     row(&mut l, "f", "follow the satellite on the map");
     row(&mut l, "+ / -", "zoom the follow window in / out (×2 to ×16); - past the");
     text(&mut l, "     widest level drops back to the whole world, + turns follow on");
+    row(&mut l, "p", "toggle labelled cities and ground stations on the map");
     row(&mut l, "s", "search Celestrak's catalogue for a satellite, by name or NORAD id");
     row(&mut l, "Enter", "on Tracked: start tracking the highlighted satellite");
     row(&mut l, "d", "on Tracked: drop the highlighted satellite from the list");
@@ -87,6 +88,7 @@ fn content(app: &App) -> Vec<Line<'static>> {
     heading(&mut l, "Map");
     row(&mut l, "◆", "the sub-satellite point — directly beneath the satellite");
     row(&mut l, "▲", "your ground station");
+    row(&mut l, "· / +", "with `p` on: a labelled city / satellite ground station");
     row(&mut l, "bright line", "the next 65 minutes of ground track");
     row(&mut l, "dim line", "the past 35 minutes of ground track");
     row(&mut l, "violet ring", "the visibility footprint — where the satellite is above 0°");
@@ -100,6 +102,9 @@ fn content(app: &App) -> Vec<Line<'static>> {
     text(&mut l, "×16 the whole-world scale, shown as `MAP ×N` in the header — and `-`");
     text(&mut l, "past the widest drops back to the whole world. `m` expands the map to");
     text(&mut l, "fill the screen.");
+    text(&mut l, "`p` labels prominent cities and ground stations, drawing as many as");
+    text(&mut l, "fit without overlapping — so a whole-world map shows only a scattered");
+    text(&mut l, "few and more fill in the further `+` zooms in, or `m` widens the map.");
     blank(&mut l);
 
     heading(&mut l, "Tracked");
