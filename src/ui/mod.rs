@@ -4,6 +4,10 @@ mod help;
 mod map;
 mod panels;
 
+/// The tightest follow-mode zoom index, re-exported so `App::zoom_in` can
+/// saturate against it without `mod map` being made public.
+pub(crate) use map::MAX_ZOOM;
+
 use chrono::Utc;
 use ratatui::layout::{Alignment, Constraint, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
@@ -291,7 +295,10 @@ fn key_hints(focus: Panel) -> Vec<String> {
     };
 
     let mut tiers: Vec<String> = [
-        &["1-6 focus", "Tab", "m map", "f follow", "s sat", "r refresh", "? help", "q quit"][..],
+        &[
+            "1-6 focus", "Tab", "m map", "f follow", "+/- zoom", "s sat", "r refresh", "? help",
+            "q quit",
+        ][..],
         &["1-6 focus", "m map", "f follow", "r refresh", "? help", "q quit"][..],
         &["r refresh", "? help", "q quit"][..],
         &["? help"][..],

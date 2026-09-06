@@ -116,6 +116,7 @@ and will not work here.
 | `d` / `Del` | on Tracked: drop the highlighted satellite from the list |
 | `m` | toggle fullscreen map |
 | `f` | follow the satellite (zoom the map on it) |
+| `+` / `-` | zoom the follow window in / out (×2–×16); `-` past the widest drops back to the whole world |
 | `s` | search Celestrak's catalogue for another object, by name or NORAD id |
 | `r` | refresh the focused panel's feed(s) now |
 | `?` | help — a scrollable in-app reference to every field, symbol and status chip |
@@ -155,10 +156,13 @@ age of the element set since its epoch. The title bar also shows the
 satellite's COSPAR international designator next to its NORAD id, when the
 terminal is wide enough to fit it.
 
-**Map** — the whole world by default; `f` zooms to a 180°×90° window centred on
-the satellite, wrapping across the dateline to keep it dead centre. `◆`
-sub-satellite point · `▲` ground station · `◉` pad of the launch
-currently highlighted in Launches, with its provider, site and coordinates.
+**Map** — the whole world by default; `f` zooms to a window centred on the
+satellite, wrapping across the dateline to keep it dead centre. `+` / `-` step
+that window through four magnifications — ×2, ×4, ×8, ×16 the whole-world scale,
+shown as `MAP ×N` in the panel header — and `-` past the widest drops back to
+the whole world. `◆` sub-satellite point · `▲` ground station · `◉` pad of the
+launch currently highlighted in Launches, with its provider, site and
+coordinates.
 
 **Space weather** (NOAA SWPC) — `Kp` planetary K-index, 0–9 · `WIND` solar wind
 speed · `Bz` north–south interplanetary field (strongly negative drives aurora) ·
