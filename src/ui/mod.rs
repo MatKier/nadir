@@ -3,6 +3,7 @@
 mod help;
 mod map;
 mod panels;
+mod places;
 
 /// The tightest follow-mode zoom index, re-exported so `App::zoom_in` can
 /// saturate against it without `mod map` being made public.
@@ -48,6 +49,12 @@ impl Theme {
     pub const COAST: Color = Color::Rgb(80, 110, 120);
     pub const STATION: Color = Color::Rgb(120, 230, 150);
     pub const PAD: Color = Color::Rgb(235, 150, 215);
+    // The optional `p` place layer — cities and ground stations. Reference
+    // scenery, not data, so it gets no hue of its own (the map's lanes are
+    // spent — see FOOTPRINT): a neutral slate a notch below LABEL, bright
+    // enough to read over COAST and the night wash, dim enough that the live
+    // markers still sit clearly on top.
+    pub const PLACE: Color = Color::Rgb(105, 120, 130);
 }
 
 /// Draw a whole frame. Takes `app` mutably only so the help overlay can
@@ -296,8 +303,8 @@ fn key_hints(focus: Panel) -> Vec<String> {
 
     let mut tiers: Vec<String> = [
         &[
-            "1-6 focus", "Tab", "m map", "f follow", "+/- zoom", "s sat", "r refresh", "? help",
-            "q quit",
+            "1-6 focus", "Tab", "m map", "f follow", "p places", "+/- zoom", "s sat", "r refresh",
+            "? help", "q quit",
         ][..],
         &["1-6 focus", "m map", "f follow", "r refresh", "? help", "q quit"][..],
         &["r refresh", "? help", "q quit"][..],

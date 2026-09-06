@@ -14,6 +14,7 @@ use crate::geo::{footprint_ring, GeoPoint};
 use crate::orbit::solar::{terminator_polyline, SunGeometry, CIVIL_TWILIGHT_DEG};
 use crate::orbit::{SatState, Tracker};
 use crate::ui::panels::truncate;
+use crate::ui::places::{Place, PLACES};
 use crate::ui::{is_focused, panel_block, PadMarker, Theme};
 
 /// Longitude half-spans of the follow window, widest first — each level halves
@@ -23,6 +24,12 @@ use crate::ui::{is_focused, panel_block, PadMarker, Theme};
 /// the projection and never its shape.
 pub(crate) const ZOOM_HALF_SPANS: [f64; 4] = [90.0, 45.0, 22.5, 11.25];
 pub(crate) const MAX_ZOOM: usize = ZOOM_HALF_SPANS.len() - 1;
+
+/// Most place labels drawn on one pane — a backstop, not the main control.
+/// The collision test does most of the thinning; this just stops a wide
+/// fullscreen map, where many labels clear each other, from turning into a
+/// solid sheet of names.
+const MAX_PLACE_LABELS: usize = 24;
 
 /// The map's coordinate bounds: the whole world when `centre` is `None`, or a
 /// follow window of `ZOOM_HALF_SPANS[zoom]` longitude around `centre`.
@@ -100,7 +107,8 @@ pub fn draw(
         .map(|p| (p.lon_deg, p.lat_deg))
         .collect();
 
-    let scene = Scene { sat, pad, station, track_past, track_future, footprint, terminator };
+    let scene =
+        Scene { sat, pad, station, track_past, track_future, footprint, terminator, places: app.places };
 
     // One canvas per pane. A single `Canvas` has one linear longitude→column
     // mapping and so cannot show the coastline in two disjoint screen
@@ -133,6 +141,8 @@ struct Scene<'a> {
     track_future: Option<Vec<Vec<GeoPoint>>>,
     footprint: Option<Vec<Vec<GeoPoint>>>,
     terminator: Vec<(f64, f64)>,
+    /// Whether the `p` layer of prominent-place labels is on.
+    places: bool,
 }
 
 /// Paint one map pane: the night wash, coastline, terminator, tracks,
@@ -177,6 +187,14 @@ fn paint_scene(
     }
     ctx.layer();
 
+    // The place layer sits under the three live markers — it's reference
+    // scenery, not data — but is laid out *against* them (they're seeded
+    // into its collision set) so a city name never ends up under the
+    // satellite even though the satellite is drawn last.
+    if scene.places {
+        draw_places(ctx, grid, scene);
+    }
+
     if let Some(g) = scene.station {
         if grid.contains(g.lon_deg) {
             ctx.print(
@@ -193,12 +211,7 @@ fn paint_scene(
     // narrow map, unlike the often much longer vehicle/mission name — except
     // when the feed didn't know it.
     if let Some(p) = &scene.pad {
-        let label = if p.provider.is_empty() || p.provider == "—" {
-            p.vehicle.to_string()
-        } else {
-            format!("{} · {}", p.provider, p.vehicle)
-        };
-        let detail = format!("{} · {}", p.site, fmt_coords(p.lat, p.lon));
+        let (label, detail) = pad_label(p);
         print_marker(
             ctx,
             grid,
@@ -227,6 +240,140 @@ fn paint_scene(
                 Span::styled("acquiring element set…", Style::new().fg(Theme::LABEL)),
             );
         }
+    }
+}
+
+/// The pad marker's two label lines: `"provider · vehicle"` (or the vehicle
+/// alone when the feed gave no provider) and `"site · coords"`. Pulled out
+/// of [`paint_scene`] so [`draw_places`] can reserve the exact footprint the
+/// marker will draw, rather than a guess at it.
+fn pad_label(p: &PadMarker<'_>) -> (String, String) {
+    let name = if p.provider.is_empty() || p.provider == "—" {
+        p.vehicle.to_string()
+    } else {
+        format!("{} · {}", p.provider, p.vehicle)
+    };
+    (name, format!("{} · {}", p.site, fmt_coords(p.lat, p.lon)))
+}
+
+/// The prominent-places layer: dim `·` cities and `+` ground stations with
+/// their names, `PLACES` walked in tier order and each label drawn only
+/// where it clears every label already placed — the satellite, station and
+/// pad seeded first, then each other. That collision test *is* the density
+/// control: on a small whole-world map only a scattered few land, and more
+/// fill in the wider the map gets or the tighter the follow window zooms,
+/// with nothing keyed to a zoom level (see [`MAX_PLACE_LABELS`] for the one
+/// backstop).
+fn draw_places(ctx: &mut Context<'_>, grid: &Grid, scene: &Scene<'_>) {
+    if grid.cols() < 2 {
+        return;
+    }
+
+    // Seed the collision set with the three markers drawn on top of this
+    // layer, so a place label never lands under one. They're laid out a
+    // second time when actually drawn — three items, far cheaper than
+    // reordering the marker block so this layer could see already-drawn
+    // cells.
+    let mut seed = Claimed::default();
+    if let Some((tr, s)) = scene.sat {
+        let m = MarkerLabel { glyph: "◆", color: Theme::SAT, name: tr.name(), detail: None };
+        seed.claim(&marker_cells(grid, s.sub_point.lon_deg, s.sub_point.lat_deg, &m));
+    }
+    if let Some(g) = scene.station {
+        let m = MarkerLabel { glyph: "▲", color: Theme::STATION, name: "", detail: None };
+        seed.claim(&marker_cells(grid, g.lon_deg, g.lat_deg, &m));
+    }
+    if let Some(p) = &scene.pad {
+        let (label, detail) = pad_label(p);
+        let m = MarkerLabel { glyph: "◉", color: Theme::PAD, name: &label, detail: Some(&detail) };
+        seed.claim(&marker_cells(grid, p.lon, p.lat, &m));
+    }
+
+    for place in selected_places(grid, seed) {
+        let m = MarkerLabel {
+            glyph: place.glyph(),
+            color: Theme::PLACE,
+            name: place.name,
+            detail: None,
+        };
+        print_marker(ctx, grid, place.lon, place.lat, &m);
+    }
+}
+
+/// Which places earn a label on `grid`, in draw order: `PLACES` walked in
+/// tier order, each kept only when its label clears `seed` (the live
+/// markers) and every place already kept, and no more than
+/// [`MAX_PLACE_LABELS`] of them. Split from [`draw_places`] so the density
+/// behaviour is testable without a canvas — a place skipped here is skipped
+/// whole, dot included, since a bare unlabelled dot on a coastline map is
+/// noise rather than a landmark.
+fn selected_places(grid: &Grid, seed: Claimed) -> Vec<&'static Place> {
+    let mut claimed = seed;
+    let mut out = Vec::new();
+    for place in PLACES {
+        if out.len() >= MAX_PLACE_LABELS {
+            break;
+        }
+        // Off this pane's window, or outside the visible latitude band.
+        if !grid.contains(place.lon) || place.lat < grid.y[0] || place.lat > grid.y[1] {
+            continue;
+        }
+        let m = MarkerLabel {
+            glyph: place.glyph(),
+            color: Theme::PLACE,
+            name: place.name,
+            detail: None,
+        };
+        let cells = marker_cells(grid, place.lon, place.lat, &m);
+        if cells.is_empty() || !claimed.free(&cells) {
+            continue;
+        }
+        claimed.claim(&cells);
+        out.push(place);
+    }
+    out
+}
+
+/// One line of a label's footprint: a cell row and the inclusive column span
+/// it covers. A label is a single row tall, so a full rectangle would be
+/// overkill.
+#[derive(Clone, Copy, Debug)]
+struct Cells {
+    row: u16,
+    from: u16,
+    to: u16,
+}
+
+impl Cells {
+    /// Columns of clearance kept between two labels — enough that they read
+    /// as separate even on adjacent rows.
+    const PAD: u16 = 2;
+
+    /// Whether two label lines are close enough to read as one: the same row
+    /// or an adjacent one, and horizontally within [`Cells::PAD`] columns.
+    /// The vertical slack is what makes the place layer thin itself on a
+    /// whole-world map and fill in as it zooms, instead of packing every
+    /// latitude band solid at any scale.
+    fn touches(self, other: Cells) -> bool {
+        self.row.abs_diff(other.row) <= 1
+            && self.from <= other.to.saturating_add(Self::PAD)
+            && other.from <= self.to.saturating_add(Self::PAD)
+    }
+}
+
+/// The label cells already spoken for on a pane. A later label overlapping
+/// one of them is dropped rather than drawn: the last write to a canvas cell
+/// wins, so two labels sharing a row would overprint into mush.
+#[derive(Default)]
+struct Claimed(Vec<Cells>);
+
+impl Claimed {
+    fn free(&self, lines: &[Cells]) -> bool {
+        !lines.iter().any(|c| self.0.iter().any(|had| had.touches(*c)))
+    }
+
+    fn claim(&mut self, lines: &[Cells]) {
+        self.0.extend_from_slice(lines);
     }
 }
 
@@ -392,6 +539,20 @@ impl Grid {
         self.y[1] - row as f64 * self.deg_per_row()
     }
 
+    /// The cell row a y-coordinate lands on — [`Grid::col_of`]'s twin on the
+    /// latitude axis, with the same round-and-epsilon so it round-trips with
+    /// [`Grid::y_of`]. Only used to reserve a label's row for collision
+    /// checks, so approximate agreement with ratatui's own truncation is
+    /// enough.
+    fn row_of(&self, y: f64) -> u16 {
+        let rows = self.rows();
+        let span = (self.y[1] - self.y[0]).abs();
+        if rows < 2 || span <= 0.0 {
+            return 0;
+        }
+        (((self.y[1] - y) * (rows - 1) as f64 / span + 1e-9).round() as u16).min(rows - 1)
+    }
+
     /// Whether longitude `x` falls within this grid's window. When the follow
     /// view is split across the dateline each pane's paint closure still sees
     /// every marker, so a marker is skipped unless the pane it belongs to is
@@ -416,57 +577,128 @@ struct MarkerLabel<'a> {
 /// Draw `marker` at `(lon, lat)`. The label goes to whichever side of the
 /// marker has more room in the canvas's cell grid, so it's a single
 /// `ctx.print` call per line — nothing gets drawn over the glyph — and it
-/// isn't clipped by an edge the way a label fixed to one side would be.
+/// isn't clipped by an edge the way a label fixed to one side would be. The
+/// placement is decided by [`label_layout`], which [`marker_cells`] reuses so
+/// the place layer can reserve exactly the cells this draws into.
 fn print_marker(ctx: &mut Context<'_>, grid: &Grid, lon: f64, lat: f64, marker: &MarkerLabel<'_>) {
-    // Not in this pane's window: leave it to the pane that does hold it. This
-    // also fixes a pre-existing glitch — a pad far outside a narrow follow
-    // window used to have its label drawn pinned to the map edge, because
-    // `col_of` saturated to the last column and the label then flipped left
-    // onto an in-bounds coordinate.
-    if !grid.contains(lon) {
+    // `None` when the marker isn't in this pane's window — leave it to the
+    // pane that does hold it. This also fixes a pre-existing glitch: a pad
+    // far outside a narrow follow window used to have its label pinned to the
+    // map edge, because `col_of` saturated to the last column and the label
+    // then flipped left onto an in-bounds coordinate.
+    let Some(layout) = label_layout(grid, lon, marker) else {
         return;
-    }
+    };
 
-    let MarkerLabel { glyph, color, name, detail } = *marker;
-    let cols = grid.cols();
+    let MarkerLabel { glyph, color, detail, .. } = *marker;
     let glyph_span = || Span::styled(glyph.to_string(), Style::new().fg(color).bold());
 
-    if cols < 2 || name.is_empty() {
+    // No room for a name, or none given: just the glyph.
+    if layout.shown.is_empty() {
         ctx.print(lon, lat, glyph_span());
         return;
     }
 
-    let marker_col = grid.col_of(lon);
-    let room_right = cols.saturating_sub(marker_col + 1);
-    let room_left = marker_col;
-    let right_side = label_on_right(room_left, room_right, name.chars().count());
-
-    let budget = (if right_side { room_right } else { room_left }).saturating_sub(1) as usize;
-    let shown = truncate(name, budget);
-
-    // Column the label text itself starts at — used again below to line the
-    // detail row up under it rather than under the glyph.
-    let text_col = if right_side {
+    let shown = layout.shown.as_str();
+    if layout.right_side {
         ctx.print(
             lon,
             lat,
             Line::from(vec![glyph_span(), Span::styled(format!(" {shown}"), Style::new().fg(color))]),
         );
-        marker_col + 1
     } else {
-        let start_col = marker_col.saturating_sub(1 + shown.chars().count() as u16);
-        let x = grid.x_of(start_col);
         ctx.print(
-            x,
+            grid.x_of(layout.start_col),
             lat,
             Line::from(vec![Span::styled(format!("{shown} "), Style::new().fg(color)), glyph_span()]),
         );
-        start_col
-    };
+    }
 
     if let Some(detail) = detail {
-        print_detail_line(ctx, grid, text_col, lat, detail);
+        print_detail_line(ctx, grid, layout.text_col, lat, detail);
     }
+}
+
+/// Where a marker's label lands: which side of the glyph, the text after
+/// truncation (empty when there's no name to draw), and the cell columns it
+/// occupies. Resolved once so [`print_marker`] and [`marker_cells`] can never
+/// disagree about placement.
+struct LabelLayout {
+    right_side: bool,
+    shown: String,
+    /// Column of the glyph itself.
+    marker_col: u16,
+    /// Column the first drawn line starts at — the glyph or the text,
+    /// whichever is leftmost.
+    start_col: u16,
+    /// Column the name, and any detail line, is aligned to.
+    text_col: u16,
+}
+
+/// Compute [`LabelLayout`] for `marker` at longitude `lon`. `None` when the
+/// marker is outside this pane's window.
+fn label_layout(grid: &Grid, lon: f64, marker: &MarkerLabel<'_>) -> Option<LabelLayout> {
+    if !grid.contains(lon) {
+        return None;
+    }
+    let cols = grid.cols();
+    let marker_col = grid.col_of(lon);
+
+    if cols < 2 || marker.name.is_empty() {
+        return Some(LabelLayout {
+            right_side: true,
+            shown: String::new(),
+            marker_col,
+            start_col: marker_col,
+            text_col: marker_col,
+        });
+    }
+
+    let room_right = cols.saturating_sub(marker_col + 1);
+    let room_left = marker_col;
+    let right_side = label_on_right(room_left, room_right, marker.name.chars().count());
+
+    let budget = (if right_side { room_right } else { room_left }).saturating_sub(1) as usize;
+    let shown = truncate(marker.name, budget);
+
+    let (start_col, text_col) = if right_side {
+        (marker_col, marker_col + 1)
+    } else {
+        let start = marker_col.saturating_sub(1 + shown.chars().count() as u16);
+        (start, start)
+    };
+
+    Some(LabelLayout { right_side, shown, marker_col, start_col, text_col })
+}
+
+/// The cells [`print_marker`] draws `marker`'s label into on this grid: one
+/// span for the glyph-and-name line, plus one for the detail line when there
+/// is one. Empty when the marker isn't in this pane's window. [`draw_places`]
+/// uses it to keep place labels off the markers and off each other.
+fn marker_cells(grid: &Grid, lon: f64, lat: f64, marker: &MarkerLabel<'_>) -> Vec<Cells> {
+    let Some(layout) = label_layout(grid, lon, marker) else {
+        return Vec::new();
+    };
+    let last = grid.cols().saturating_sub(1);
+    let row = grid.row_of(lat);
+
+    if layout.shown.is_empty() {
+        return vec![Cells { row, from: layout.marker_col, to: layout.marker_col }];
+    }
+
+    // Right side draws `glyph ' ' name` from `start_col` (== the glyph
+    // column); left side draws `name ' ' glyph` from `start_col`. Either way
+    // the run is `shown_len + 2` cells wide.
+    let shown_len = layout.shown.chars().count() as u16;
+    let mut out =
+        vec![Cells { row, from: layout.start_col, to: (layout.start_col + shown_len + 1).min(last) }];
+
+    if let Some(detail) = marker.detail {
+        if let Some(cells) = detail_cells(grid, layout.text_col, lat, detail) {
+            out.push(cells);
+        }
+    }
+    out
 }
 
 /// The dim second line of a marker's label: one cell row below it, or above
@@ -487,6 +719,31 @@ fn print_detail_line(ctx: &mut Context<'_>, grid: &Grid, text_col: u16, lat: f64
     let budget = grid.cols().saturating_sub(text_col) as usize;
     let x = grid.x_of(text_col);
     ctx.print(x, y, Span::styled(truncate(text, budget), Style::new().fg(Theme::LABEL)));
+}
+
+/// The cells [`print_detail_line`] would occupy, or `None` when it would draw
+/// nothing (a one-row grid, or the detail row falling below the visible
+/// band). Mirrors that function's own row choice — one row below the marker,
+/// or one above at the bottom edge.
+fn detail_cells(grid: &Grid, text_col: u16, lat: f64, text: &str) -> Option<Cells> {
+    if grid.rows() < 2 {
+        return None;
+    }
+    let deg_per_row = grid.deg_per_row();
+    let mut y = lat - deg_per_row;
+    if y < grid.y[0] {
+        y = lat + deg_per_row;
+    }
+    if y > grid.y[1] {
+        return None;
+    }
+    let last = grid.cols().saturating_sub(1);
+    let len = truncate(text, grid.cols().saturating_sub(text_col) as usize).chars().count() as u16;
+    Some(Cells {
+        row: grid.row_of(y),
+        from: text_col,
+        to: (text_col + len.saturating_sub(1)).min(last),
+    })
 }
 
 /// Which side of the marker its label goes on. Defaults to the right and
@@ -785,5 +1042,150 @@ mod tests {
                 );
             }
         }
+    }
+
+    // ---- the `p` place layer ------------------------------------------------
+
+    /// A grid with real rows, for the place-layer tests below (the `col_of`/
+    /// `x_of` tests above only ever needed one row).
+    fn map_grid(cols: u16, rows: u16, x: [f64; 2], y: [f64; 2]) -> Grid {
+        Grid { inner: Rect::new(0, 0, cols, rows), x, y }
+    }
+
+    #[test]
+    fn claimed_rejects_a_nearby_label_and_accepts_a_separated_one() {
+        let mut c = Claimed::default();
+        c.claim(&[Cells { row: 5, from: 10, to: 20 }]);
+
+        // Same row, columns overlap outright.
+        assert!(!c.free(&[Cells { row: 5, from: 18, to: 25 }]));
+        // Same row, abutting or within the padding gap: reads as one run.
+        assert!(!c.free(&[Cells { row: 5, from: 21, to: 30 }]));
+        assert!(!c.free(&[Cells { row: 5, from: 22, to: 30 }]));
+        // Same row, a clear gap of PAD columns: allowed.
+        assert!(c.free(&[Cells { row: 5, from: 23, to: 30 }]));
+        // Directly above or below and overlapping: still too close.
+        assert!(!c.free(&[Cells { row: 6, from: 12, to: 18 }]));
+        // Two rows clear: fine.
+        assert!(c.free(&[Cells { row: 7, from: 12, to: 18 }]));
+    }
+
+    #[test]
+    fn marker_cells_covers_exactly_the_columns_print_marker_would_write() {
+        let g = map_grid(120, 40, [-180.0, 180.0], [-90.0, 90.0]);
+
+        // Right-side label: `glyph ' ' name` printed from the marker's own
+        // column, so the run is name-length + 2 wide starting there.
+        let m = MarkerLabel { glyph: "·", color: Theme::PLACE, name: "Nairobi", detail: None };
+        let (lat, lon) = (-1.29, 36.82);
+        let layout = label_layout(&g, lon, &m).unwrap();
+        assert!(layout.right_side, "a short name near mid-map goes right");
+        let shown = layout.shown.chars().count() as u16;
+        let cells = marker_cells(&g, lon, lat, &m);
+        assert_eq!(cells.len(), 1);
+        assert_eq!(cells[0].row, g.row_of(lat));
+        assert_eq!(cells[0].from, g.col_of(lon));
+        assert_eq!(cells[0].to, (g.col_of(lon) + shown + 1).min(g.cols() - 1));
+
+        // Left-side label near the right edge: `name ' ' glyph` printed from
+        // `start_col`, glyph landing on the marker column.
+        let m = MarkerLabel { glyph: "·", color: Theme::PLACE, name: "Vladivostok", detail: None };
+        let (lat, lon) = (43.12, 172.5);
+        let layout = label_layout(&g, lon, &m).unwrap();
+        assert!(!layout.right_side, "a long name at the right edge flips left");
+        let shown = layout.shown.chars().count() as u16;
+        let cells = marker_cells(&g, lon, lat, &m);
+        assert_eq!(cells[0].from, layout.start_col);
+        assert_eq!(cells[0].to, (layout.start_col + shown + 1).min(g.cols() - 1));
+        // The glyph sits on (or just left of, after saturation) the marker col.
+        assert!(cells[0].to >= layout.marker_col.saturating_sub(1));
+    }
+
+    #[test]
+    fn marker_cells_puts_the_detail_line_on_an_adjacent_row() {
+        let g = map_grid(120, 40, [-180.0, 180.0], [-90.0, 90.0]);
+        let detail = "SLC-4E · 34.63°N 120.61°W";
+        let m = MarkerLabel { glyph: "◉", color: Theme::PAD, name: "SpaceX · Falcon 9", detail: Some(detail) };
+
+        // Mid-map: the detail row is the one below.
+        let cells = marker_cells(&g, -30.0, 0.0, &m);
+        assert_eq!(cells.len(), 2);
+        assert_eq!(cells[1].row, cells[0].row + 1);
+
+        // Hard against the bottom bound: it flips to the row above instead.
+        let cells = marker_cells(&g, -30.0, -89.5, &m);
+        assert_eq!(cells.len(), 2);
+        assert_eq!(cells[1].row + 1, cells[0].row);
+    }
+
+    #[test]
+    fn a_narrower_map_never_labels_more_places_than_a_wider_one() {
+        // Fewer columns can only mean more collisions, so the count is
+        // monotone in width — the density genuinely follows how much room
+        // there is, with nothing keyed to a zoom level.
+        let mut last = 0usize;
+        for cols in [40u16, 50, 64, 80, 110, 150] {
+            let g = map_grid(cols, cols / 3, [-180.0, 180.0], [-90.0, 90.0]);
+            let n = selected_places(&g, Claimed::default()).len();
+            assert!(n >= last, "width {cols} labelled {n}, narrower labelled {last}");
+            assert!(n <= MAX_PLACE_LABELS, "width {cols} exceeded the cap with {n}");
+            last = n;
+        }
+        assert!(last == MAX_PLACE_LABELS, "a wide whole-world map should fill to the cap");
+    }
+
+    #[test]
+    fn a_window_over_open_ocean_labels_only_its_few_anchors() {
+        // The central Pacific: almost nothing is there, so the layer draws
+        // the two or three sparse-region anchors that are and no more — and
+        // every one it picks is really inside the window.
+        let g = map_grid(90, 28, [150.0, 240.0], [-30.0, 30.0]);
+        let picked = selected_places(&g, Claimed::default());
+        assert!((1..=6).contains(&picked.len()), "pacific window labelled {}", picked.len());
+        for p in &picked {
+            assert!(g.contains(p.lon), "{} isn't in the window", p.name);
+        }
+    }
+
+    #[test]
+    fn place_labels_never_land_on_the_satellite_or_pad_label() {
+        // A Europe-ish zoom, with a satellite marker parked right over London
+        // where the city labels are densest.
+        let g = map_grid(120, 36, [-40.0, 40.0], [30.0, 70.0]);
+        let sat = MarkerLabel { glyph: "◆", color: Theme::SAT, name: "ISS (ZARYA)", detail: None };
+        let seed_cells = marker_cells(&g, -0.13, 51.5, &sat);
+        assert!(!seed_cells.is_empty(), "the satellite marker should be on this grid");
+
+        let mut seed = Claimed::default();
+        seed.claim(&seed_cells);
+        for p in selected_places(&g, seed) {
+            let m = MarkerLabel { glyph: p.glyph(), color: Theme::PLACE, name: p.name, detail: None };
+            for c in marker_cells(&g, p.lon, p.lat, &m) {
+                for s in &seed_cells {
+                    assert!(!c.touches(*s), "{}'s label overlaps the satellite label", p.name);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn no_place_is_labelled_outside_its_own_pane_across_the_dateline() {
+        // A follow window centred at 175°E, split into a near and a wrapped
+        // pane. Each pane selects independently; a place must land in exactly
+        // one, and only in the pane whose window really holds its longitude.
+        let cols = 120u16;
+        let ps = panes(inner_rect(cols), [175.0 - 90.0, 175.0 + 90.0]);
+        assert_eq!(ps.len(), 2, "this centre must split");
+
+        let mut labelled: Vec<&str> = Vec::new();
+        for pane in &ps {
+            let g = Grid { inner: pane.rect, x: pane.x, y: [-60.0, 60.0] };
+            for p in selected_places(&g, Claimed::default()) {
+                assert!(g.contains(p.lon), "{} labelled by a pane that doesn't hold it", p.name);
+                labelled.push(p.name);
+            }
+        }
+        let unique: std::collections::HashSet<_> = labelled.iter().collect();
+        assert_eq!(unique.len(), labelled.len(), "a place was labelled twice across the seam");
     }
 }

@@ -117,6 +117,7 @@ and will not work here.
 | `m` | toggle fullscreen map |
 | `f` | follow the satellite (zoom the map on it) |
 | `+` / `-` | zoom the follow window in / out (×2–×16); `-` past the widest drops back to the whole world |
+| `p` | toggle labelled cities and ground stations on the map |
 | `s` | search Celestrak's catalogue for another object, by name or NORAD id |
 | `r` | refresh the focused panel's feed(s) now |
 | `?` | help — a scrollable in-app reference to every field, symbol and status chip |
@@ -162,7 +163,9 @@ that window through four magnifications — ×2, ×4, ×8, ×16 the whole-world 
 shown as `MAP ×N` in the panel header — and `-` past the widest drops back to
 the whole world. `◆` sub-satellite point · `▲` ground station · `◉` pad of the
 launch currently highlighted in Launches, with its provider, site and
-coordinates.
+coordinates. `p` toggles a layer of labelled reference points — `·` cities and
+`+` satellite ground stations — drawn as many as fit without overlapping, so a
+whole-world map shows only a scattered few and more fill in as you zoom.
 
 **Space weather** (NOAA SWPC) — `Kp` planetary K-index, 0–9 · `WIND` solar wind
 speed · `Bz` north–south interplanetary field (strongly negative drives aurora) ·
