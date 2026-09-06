@@ -67,6 +67,8 @@ fn content(app: &App) -> Vec<Line<'static>> {
     row(&mut l, "Home / End", "jump to the top / bottom of this help");
     row(&mut l, "m", "toggle fullscreen map");
     row(&mut l, "f", "follow the satellite on the map");
+    row(&mut l, "+ / -", "zoom the follow window in / out (×2 to ×16); - past the");
+    text(&mut l, "     widest level drops back to the whole world, + turns follow on");
     row(&mut l, "s", "search Celestrak's catalogue for a satellite, by name or NORAD id");
     row(&mut l, "Enter", "on Tracked: start tracking the highlighted satellite");
     row(&mut l, "d", "on Tracked: drop the highlighted satellite from the list");
@@ -92,9 +94,12 @@ fn content(app: &App) -> Vec<Line<'static>> {
     row(&mut l, "dark ground", "the night side of the Earth");
     row(&mut l, "lighter band", "civil twilight — the Sun 0°–6° below the horizon");
     row(&mut l, "◉", "pad of the highlighted launch, with its provider, site and coordinates — see below");
-    text(&mut l, "The map shows the whole world; `f` zooms it to a 180°×90° window");
-    text(&mut l, "centred on the satellite, wrapping across the dateline to keep it");
-    text(&mut l, "dead centre, and `m` expands the map to fill the screen.");
+    text(&mut l, "The map shows the whole world; `f` zooms it to a window centred on");
+    text(&mut l, "the satellite, wrapping across the dateline to keep it dead centre.");
+    text(&mut l, "`+` / `-` step that window through four magnifications — ×2, ×4, ×8,");
+    text(&mut l, "×16 the whole-world scale, shown as `MAP ×N` in the header — and `-`");
+    text(&mut l, "past the widest drops back to the whole world. `m` expands the map to");
+    text(&mut l, "fill the screen.");
     blank(&mut l);
 
     heading(&mut l, "Tracked");

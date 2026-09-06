@@ -16,6 +16,47 @@ use crate::orbit::{SatState, Tracker};
 use crate::ui::panels::truncate;
 use crate::ui::{is_focused, panel_block, PadMarker, Theme};
 
+/// Longitude half-spans of the follow window, widest first — each level halves
+/// the window, so the scale doubles: ×2, ×4, ×8, ×16 against the whole world.
+/// Latitude gets half the longitude half-span, which is the 2:1 aspect the
+/// whole-world view (360°×180°) already has, so zooming changes the scale of
+/// the projection and never its shape.
+pub(crate) const ZOOM_HALF_SPANS: [f64; 4] = [90.0, 45.0, 22.5, 11.25];
+pub(crate) const MAX_ZOOM: usize = ZOOM_HALF_SPANS.len() - 1;
+
+/// The map's coordinate bounds: the whole world when `centre` is `None`, or a
+/// follow window of `ZOOM_HALF_SPANS[zoom]` longitude around `centre`.
+///
+/// The centre longitude is *not* clamped — the window is free to run past
+/// ±180°, and the part that overhangs the map is drawn by a second canvas pane
+/// wrapped onto the opposite edge (see `panes`). Latitude has no such wrap, so
+/// the centre is clamped to keep the window on the map — but only by its own
+/// half-span, so a tight zoom can still push the window flush against a pole,
+/// which is exactly where a tight zoom is most wanted.
+fn view_bounds(centre: Option<&GeoPoint>, zoom: usize) -> ([f64; 2], [f64; 2]) {
+    let Some(c) = centre else {
+        return ([-180.0, 180.0], [-90.0, 90.0]);
+    };
+    let hx = ZOOM_HALF_SPANS[zoom.min(MAX_ZOOM)];
+    let hy = hx / 2.0;
+    let cx = c.lon_deg;
+    let cy = c.lat_deg.clamp(-(90.0 - hy), 90.0 - hy);
+    ([cx - hx, cx + hx], [cy - hy, cy + hy])
+}
+
+/// The map panel's title: plain `MAP` with no follow centre, or `MAP ×N` while
+/// following, where `N` is the scale against the whole-world view. Derived from
+/// the same `centre` option as [`view_bounds`], so the two can never disagree.
+fn zoom_title(centre: Option<&GeoPoint>, zoom: usize) -> String {
+    match centre {
+        None => "MAP".to_string(),
+        Some(_) => {
+            let scale = 2u32.pow(zoom.min(MAX_ZOOM) as u32 + 1);
+            format!("MAP ×{scale}")
+        }
+    }
+}
+
 pub fn draw(
     frame: &mut Frame,
     area: Rect,
@@ -24,7 +65,13 @@ pub fn draw(
     now: DateTime<Utc>,
     pad: Option<PadMarker>,
 ) {
-    let block = panel_block(Panel::Map, "MAP", is_focused(app, Panel::Map) || app.map_fullscreen);
+    // The follow-window centre — `Some` only once we're following *and* an
+    // element set has arrived, so the zoom indicator and the bounds can never
+    // claim a magnification the map isn't actually showing.
+    let centre = sat.filter(|_| app.follow).map(|(_, s)| &s.sub_point);
+    let title = zoom_title(centre, app.zoom);
+    let block =
+        panel_block(Panel::Map, &title, is_focused(app, Panel::Map) || app.map_fullscreen);
     // The block's inner cell grid, measured before the block is rendered —
     // needed both to place the pane canvases inside it and to budget marker
     // labels against the same grid ratatui maps coordinates onto (see
@@ -33,20 +80,7 @@ pub fn draw(
     let inner = block.inner(area);
     frame.render_widget(block, area);
 
-    // View bounds: the whole world, or a 2x zoom centred on the satellite.
-    // In follow mode the centre longitude is *not* clamped — the window is
-    // free to run past ±180°, and the part that overhangs the map is drawn by
-    // a second canvas pane wrapped onto the opposite edge (see `panes`).
-    // Latitude has no such wrap, so it stays clamped to keep the window on
-    // the map.
-    let (x_bounds, y_bounds) = match (app.follow, sat) {
-        (true, Some((_, s))) => {
-            let cx = s.sub_point.lon_deg;
-            let cy = s.sub_point.lat_deg.clamp(-45.0, 45.0);
-            ([cx - 90.0, cx + 90.0], [cy - 45.0, cy + 45.0])
-        }
-        _ => ([-180.0, 180.0], [-90.0, 90.0]),
-    };
+    let (x_bounds, y_bounds) = view_bounds(centre, app.zoom);
 
     let station = app.config.ground_station();
     let track_future = sat.map(|(tr, _)| {
@@ -582,6 +616,89 @@ mod tests {
         Rect::new(0, 0, cols, 20)
     }
 
+    /// A ground point at `(lat, lon)` for the `view_bounds` tests.
+    fn gp(lat: f64, lon: f64) -> GeoPoint {
+        GeoPoint::new(lat, lon, 0.0)
+    }
+
+    #[test]
+    fn view_bounds_without_a_centre_is_the_whole_world() {
+        for zoom in 0..=MAX_ZOOM + 2 {
+            assert_eq!(view_bounds(None, zoom), ([-180.0, 180.0], [-90.0, 90.0]));
+        }
+    }
+
+    #[test]
+    fn view_bounds_halves_the_window_at_each_zoom_level() {
+        let c = gp(0.0, 0.0);
+        let lon_spans: Vec<f64> = (0..=MAX_ZOOM)
+            .map(|z| {
+                let (x, _) = view_bounds(Some(&c), z);
+                x[1] - x[0]
+            })
+            .collect();
+        assert_eq!(lon_spans, vec![180.0, 90.0, 45.0, 22.5]);
+
+        // Every level keeps the whole-world 2:1 longitude:latitude aspect, so
+        // zooming only rescales the projection, never reshapes it.
+        for z in 0..=MAX_ZOOM {
+            let (x, y) = view_bounds(Some(&c), z);
+            let (lon, lat) = (x[1] - x[0], y[1] - y[0]);
+            assert!((lon - 2.0 * lat).abs() < 1e-9, "level {z}: {lon} vs 2×{lat}");
+        }
+    }
+
+    #[test]
+    fn view_bounds_keeps_the_window_on_the_map_at_every_latitude() {
+        for z in 0..=MAX_ZOOM {
+            let full_height = view_bounds(Some(&gp(0.0, 0.0)), z).1;
+            let height = full_height[1] - full_height[0];
+            for step in -18..=18 {
+                let lat = f64::from(step) * 5.0;
+                let (_, y) = view_bounds(Some(&gp(lat, 0.0)), z);
+                assert!(y[0] >= -90.0 - 1e-9 && y[1] <= 90.0 + 1e-9, "lat {lat} level {z}: {y:?}");
+                assert!((y[1] - y[0] - height).abs() < 1e-9, "lat {lat} level {z} lost height");
+            }
+        }
+    }
+
+    #[test]
+    fn view_bounds_lets_a_tighter_zoom_reach_closer_to_the_pole() {
+        // A sub-point at 80°N: the tightest window (±5.625° of latitude) fits
+        // around it untouched, while the widest (±45°) has to clamp its centre
+        // well south of it.
+        let (_, tight) = view_bounds(Some(&gp(80.0, 0.0)), MAX_ZOOM);
+        let tight_centre = (tight[0] + tight[1]) / 2.0;
+        assert!((tight_centre - 80.0).abs() < 1e-9, "tight centre {tight_centre} should be 80");
+        assert!(tight[1] > 85.0, "tight window should reach past 85°N, got {}", tight[1]);
+
+        let (_, wide) = view_bounds(Some(&gp(80.0, 0.0)), 0);
+        let wide_centre = (wide[0] + wide[1]) / 2.0;
+        assert!(wide_centre < 80.0 - 1e-9, "wide centre {wide_centre} should be clamped south");
+        assert!((wide[1] - 90.0).abs() < 1e-9, "wide window should sit flush against the pole");
+    }
+
+    #[test]
+    fn view_bounds_leaves_longitude_unclamped_across_the_dateline() {
+        for (z, hx) in ZOOM_HALF_SPANS.iter().enumerate() {
+            let (x, _) = view_bounds(Some(&gp(0.0, 175.0)), z);
+            assert!((x[0] - (175.0 - hx)).abs() < 1e-9);
+            assert!((x[1] - (175.0 + hx)).abs() < 1e-9);
+            assert!(x[1] > 180.0, "level {z}: window should overhang +180°, got {}", x[1]);
+        }
+    }
+
+    #[test]
+    fn zoom_title_names_the_scale_against_the_whole_world() {
+        assert_eq!(zoom_title(None, 0), "MAP");
+        assert_eq!(zoom_title(None, MAX_ZOOM), "MAP");
+        let c = gp(0.0, 0.0);
+        assert_eq!(zoom_title(Some(&c), 0), "MAP ×2");
+        assert_eq!(zoom_title(Some(&c), 1), "MAP ×4");
+        assert_eq!(zoom_title(Some(&c), 2), "MAP ×8");
+        assert_eq!(zoom_title(Some(&c), MAX_ZOOM), "MAP ×16");
+    }
+
     #[test]
     fn grid_contains_rejects_a_longitude_outside_the_window() {
         let g = Grid { inner: Rect::new(0, 0, 50, 10), x: [85.0, 180.0], y: [-90.0, 90.0] };
@@ -649,19 +766,24 @@ mod tests {
         // broke near the dateline.
         let cols = 101u16;
         let centre_col = i32::from((cols - 1) / 2);
-        for step in 0..=72 {
-            let lon = -180.0 + f64::from(step) * 5.0;
-            let ps = panes(inner_rect(cols), [lon - 90.0, lon + 90.0]);
-            let holder = ps
-                .iter()
-                .find(|p| Grid { inner: p.rect, x: p.x, y: [-90.0, 90.0] }.contains(lon))
-                .expect("some pane holds the sub-point");
-            let g = Grid { inner: holder.rect, x: holder.x, y: [-90.0, 90.0] };
-            let panel_col = i32::from(holder.rect.x + g.col_of(lon));
-            assert!(
-                (panel_col - centre_col).abs() <= 1,
-                "lon {lon}: column {panel_col} vs centre {centre_col}"
-            );
+        // ...and at every zoom level: parameterising the sweep proves the
+        // two-pane dateline split still centres the marker however narrow the
+        // follow window gets.
+        for hx in ZOOM_HALF_SPANS {
+            for step in 0..=72 {
+                let lon = -180.0 + f64::from(step) * 5.0;
+                let ps = panes(inner_rect(cols), [lon - hx, lon + hx]);
+                let holder = ps
+                    .iter()
+                    .find(|p| Grid { inner: p.rect, x: p.x, y: [-90.0, 90.0] }.contains(lon))
+                    .expect("some pane holds the sub-point");
+                let g = Grid { inner: holder.rect, x: holder.x, y: [-90.0, 90.0] };
+                let panel_col = i32::from(holder.rect.x + g.col_of(lon));
+                assert!(
+                    (panel_col - centre_col).abs() <= 1,
+                    "half-span {hx}, lon {lon}: column {panel_col} vs centre {centre_col}"
+                );
+            }
         }
     }
 }

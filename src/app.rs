@@ -134,6 +134,11 @@ pub struct App {
     pub focus: Panel,
     pub map_fullscreen: bool,
     pub follow: bool,
+    /// Follow-window magnification: 0 is the widest follow level (×2 the whole
+    /// world), rising to `crate::ui::MAX_ZOOM` (×16). Only meaningful while
+    /// `follow` is set, but it *survives* an `f` toggle, so turning follow back
+    /// on returns to the level you left.
+    pub zoom: usize,
     pub show_help: bool,
     /// Scroll offset within the help overlay, in lines; clamped against its
     /// content height at render time.
@@ -167,6 +172,30 @@ impl App {
     fn set_focus(&mut self, panel: Panel) {
         self.focus = panel;
         self.list_pos = 0;
+    }
+
+    /// Zoom the follow window one step tighter. When not following, this turns
+    /// follow on at the remembered level rather than stepping — so `+` from the
+    /// whole world and `f` land on the same place, and neither is ever a no-op
+    /// while a tighter view exists.
+    fn zoom_in(&mut self) {
+        if !self.follow {
+            self.follow = true;
+        } else {
+            self.zoom = (self.zoom + 1).min(crate::ui::MAX_ZOOM);
+        }
+    }
+
+    /// Zoom the follow window one step wider. At the widest follow level this
+    /// drops out of follow entirely to the whole world — the outermost stop of
+    /// the same continuum — leaving `zoom` untouched so `f` or `+` returns to
+    /// the level just left.
+    fn zoom_out(&mut self) {
+        if self.zoom == 0 {
+            self.follow = false;
+        } else {
+            self.zoom -= 1;
+        }
     }
 
     /// Move the selection within the focused panel's list, if it has one.
@@ -294,6 +323,9 @@ impl App {
             }
             KeyCode::Char('m') => self.map_fullscreen = !self.map_fullscreen,
             KeyCode::Char('f') => self.follow = !self.follow,
+            // `=`/`_` so the binding fires whether or not shift is held.
+            KeyCode::Char('+') | KeyCode::Char('=') => self.zoom_in(),
+            KeyCode::Char('-') | KeyCode::Char('_') => self.zoom_out(),
             KeyCode::Tab => self.set_focus(self.focus.next()),
             KeyCode::Char(c @ '1'..='6') => {
                 if let Some(panel) = Panel::from_key(c as u8 - b'0') {
@@ -598,6 +630,7 @@ pub async fn run(mut config: Config) -> Result<()> {
         // The map opens on the whole world so the first frame has global
         // context; `f` zooms it to a window centred on the satellite.
         follow: false,
+        zoom: 0,
         show_help: false,
         help_scroll: 0,
         should_quit: false,
@@ -1027,6 +1060,7 @@ mod tests {
             focus: Panel::Tracked,
             map_fullscreen: false,
             follow: false,
+            zoom: 0,
             show_help: false,
             help_scroll: 0,
             should_quit: false,
@@ -1145,5 +1179,46 @@ mod tests {
         app.submit_sat_input();
         // Nothing to select yet, so the popup must stay open for the result.
         assert!(app.sat_input.is_some());
+    }
+
+    fn press(app: &mut App, c: char) {
+        app.handle_key(KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE));
+    }
+
+    #[test]
+    fn zooming_in_from_the_whole_world_returns_to_the_level_it_left() {
+        let mut app = test_app(Config::default());
+        // Follow, climb to ×8 (zoom index 2)...
+        press(&mut app, 'f');
+        press(&mut app, '+');
+        press(&mut app, '+');
+        assert!(app.follow && app.zoom == 2);
+        // ...toggle follow off with `f` — the level is only parked, not reset...
+        press(&mut app, 'f');
+        assert!(!app.follow && app.zoom == 2);
+        // ...and `+` from the whole world resumes exactly where it left off.
+        press(&mut app, '+');
+        assert!(app.follow && app.zoom == 2);
+    }
+
+    #[test]
+    fn zooming_out_at_the_widest_level_returns_to_the_whole_world() {
+        let mut app = test_app(Config::default());
+        press(&mut app, 'f'); // follow at the widest level, zoom index 0
+        assert!(app.follow && app.zoom == 0);
+        press(&mut app, '-'); // one step wider than the widest follow level
+        assert!(!app.follow, "stepping out past the widest level drops follow");
+        assert_eq!(app.zoom, 0);
+    }
+
+    #[test]
+    fn zooming_in_saturates_at_the_tightest_level() {
+        let mut app = test_app(Config::default());
+        press(&mut app, 'f');
+        for _ in 0..10 {
+            press(&mut app, '+');
+        }
+        assert!(app.follow);
+        assert_eq!(app.zoom, crate::ui::MAX_ZOOM);
     }
 }
