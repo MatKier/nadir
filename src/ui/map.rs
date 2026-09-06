@@ -25,21 +25,28 @@ pub fn draw(
     pad: Option<PadMarker>,
 ) {
     let block = panel_block(Panel::Map, "MAP", is_focused(app, Panel::Map) || app.map_fullscreen);
-    // The block's inner cell grid, measured before the block is moved into
-    // the Canvas — needed to budget marker labels against the same grid
-    // ratatui itself maps coordinates onto (see `Canvas::render`).
+    // The block's inner cell grid, measured before the block is rendered —
+    // needed both to place the pane canvases inside it and to budget marker
+    // labels against the same grid ratatui maps coordinates onto (see
+    // `Canvas::render`). The border is drawn on its own rather than through
+    // `Canvas::block`, because the map now needs more than one canvas.
     let inner = block.inner(area);
+    frame.render_widget(block, area);
 
-    // View bounds: whole world, or a 2x zoom centred on the satellite.
+    // View bounds: the whole world, or a 2x zoom centred on the satellite.
+    // In follow mode the centre longitude is *not* clamped — the window is
+    // free to run past ±180°, and the part that overhangs the map is drawn by
+    // a second canvas pane wrapped onto the opposite edge (see `panes`).
+    // Latitude has no such wrap, so it stays clamped to keep the window on
+    // the map.
     let (x_bounds, y_bounds) = match (app.follow, sat) {
         (true, Some((_, s))) => {
-            let cx = s.sub_point.lon_deg.clamp(-90.0, 90.0);
+            let cx = s.sub_point.lon_deg;
             let cy = s.sub_point.lat_deg.clamp(-45.0, 45.0);
             ([cx - 90.0, cx + 90.0], [cy - 45.0, cy + 45.0])
         }
         _ => ([-180.0, 180.0], [-90.0, 90.0]),
     };
-    let grid = Grid { inner, x: x_bounds, y: y_bounds };
 
     let station = app.config.ground_station();
     let track_future = sat.map(|(tr, _)| {
@@ -54,115 +61,191 @@ pub fn draw(
     // its far half wraps onto the opposite map edge instead of being clipped.
     let footprint = sat.map(|(_, s)| footprint_ring(&s.sub_point, s.footprint_km, 180));
 
-    let (night, twilight) = night_wash(&grid, now);
-
     let terminator: Vec<(f64, f64)> = terminator_polyline(now, 240)
         .into_iter()
         .map(|p| (p.lon_deg, p.lat_deg))
         .collect();
 
-    let canvas = Canvas::default()
-        .block(block)
-        .marker(Marker::Braille)
-        .x_bounds(x_bounds)
-        .y_bounds(y_bounds)
-        .paint(move |ctx| {
-            // The night wash is a *background*, not a foreground overlay: it
-            // has to go on a `Block` grid, whose cells carry a bg colour
-            // (ratatui's `PatternGrid`, what `Braille` uses, only ever sets
-            // fg — see `CharGrid::apply_color_to_bg` upstream). Painted first
-            // and switched away from before the coastline, so the Braille
-            // coastline dots drawn next land on top of it rather than being
-            // recoloured by it the way a same-layer stipple would.
-            ctx.marker(Marker::Block);
-            ctx.draw(&Points {
-                coords: &twilight,
-                color: Theme::TWILIGHT,
-            });
-            ctx.draw(&Points {
-                coords: &night,
-                color: Theme::NIGHT,
-            });
+    let scene = Scene { sat, pad, station, track_past, track_future, footprint, terminator };
 
-            ctx.marker(Marker::Braille);
-            ctx.draw(&Map {
-                resolution: MapResolution::High,
-                color: Theme::COAST,
-            });
+    // One canvas per pane. A single `Canvas` has one linear longitude→column
+    // mapping and so cannot show the coastline in two disjoint screen
+    // regions; when the follow window crosses ±180° `panes` cuts `inner` on a
+    // whole-column boundary into a near half and a wrapped half that tile it
+    // exactly, each drawn from the same `[-180, 180)` geometry in its own
+    // real-longitude bounds. Away from the dateline (and whenever follow is
+    // off) it returns a single full-width pane and this is exactly the old
+    // single-canvas render.
+    for pane in panes(inner, x_bounds) {
+        let grid = Grid { inner: pane.rect, x: pane.x, y: y_bounds };
+        let (night, twilight) = night_wash(&grid, now);
+        let canvas = Canvas::default()
+            .marker(Marker::Braille)
+            .x_bounds(pane.x)
+            .y_bounds(y_bounds)
+            .paint(|ctx| paint_scene(ctx, &grid, &scene, &night, &twilight));
+        frame.render_widget(canvas, pane.rect);
+    }
+}
 
-            ctx.draw(&Points {
-                coords: &terminator,
-                color: Theme::CAUTION,
-            });
+/// Everything the map draws, gathered once in [`draw`] so it can be handed to
+/// one paint closure per [`Pane`] without recomputing the orbital pipeline for
+/// each half of a split view.
+struct Scene<'a> {
+    sat: Option<&'a (Tracker, SatState)>,
+    pad: Option<PadMarker<'a>>,
+    station: Option<GeoPoint>,
+    track_past: Option<Vec<Vec<GeoPoint>>>,
+    track_future: Option<Vec<Vec<GeoPoint>>>,
+    footprint: Option<Vec<Vec<GeoPoint>>>,
+    terminator: Vec<(f64, f64)>,
+}
 
-            // Footprint before the tracks, same layer: a GEO ring crosses the
-            // ground track several times, and the last write to a cell wins, so
-            // drawing it first lets the track stay continuous through every
-            // crossing rather than being punched through by the ring.
-            if let Some(segments) = &footprint {
-                draw_polyline(ctx, segments, Theme::FOOTPRINT);
-            }
-            if let Some(segments) = &track_past {
-                draw_polyline(ctx, segments, Theme::TRACK_PAST);
-            }
-            if let Some(segments) = &track_future {
-                draw_polyline(ctx, segments, Theme::TRACK_FUTURE);
-            }
-            ctx.layer();
+/// Paint one map pane: the night wash, coastline, terminator, tracks,
+/// footprint and markers, in the same layer order the single canvas used
+/// before the view could be split. `night`/`twilight` are this pane's own
+/// wash cells; every other field is shared across panes via `scene`.
+fn paint_scene(
+    ctx: &mut Context<'_>,
+    grid: &Grid,
+    scene: &Scene<'_>,
+    night: &[(f64, f64)],
+    twilight: &[(f64, f64)],
+) {
+    // The night wash is a *background*, not a foreground overlay: it has to go
+    // on a `Block` grid, whose cells carry a bg colour (ratatui's
+    // `PatternGrid`, what `Braille` uses, only ever sets fg — see
+    // `CharGrid::apply_color_to_bg` upstream). Painted first and switched away
+    // from before the coastline, so the Braille coastline dots drawn next land
+    // on top of it rather than being recoloured by it the way a same-layer
+    // stipple would.
+    ctx.marker(Marker::Block);
+    ctx.draw(&Points { coords: twilight, color: Theme::TWILIGHT });
+    ctx.draw(&Points { coords: night, color: Theme::NIGHT });
 
-            if let Some(g) = station {
-                ctx.print(
-                    g.lon_deg,
-                    g.lat_deg,
-                    Span::styled("▲", Style::new().fg(Theme::STATION).bold()),
-                );
-            }
+    ctx.marker(Marker::Braille);
+    ctx.draw(&Map { resolution: MapResolution::High, color: Theme::COAST });
 
-            // The highlighted launch's pad, drawn before the satellite so
-            // the satellite marker wins if the two ever coincide. The label
-            // leads with the provider — a short, stable field that survives
-            // truncation on a narrow map, unlike the often much longer
-            // vehicle/mission name — except when the feed didn't know it.
-            if let Some(p) = &pad {
-                let label = if p.provider.is_empty() || p.provider == "—" {
-                    p.vehicle.to_string()
-                } else {
-                    format!("{} · {}", p.provider, p.vehicle)
-                };
-                let detail = format!("{} · {}", p.site, fmt_coords(p.lat, p.lon));
-                print_marker(
-                    ctx,
-                    &grid,
-                    p.lon,
-                    p.lat,
-                    &MarkerLabel { glyph: "◉", color: Theme::PAD, name: &label, detail: Some(&detail) },
-                );
-            }
+    ctx.draw(&Points { coords: &scene.terminator, color: Theme::CAUTION });
 
-            match sat {
-                Some((tr, s)) => {
-                    print_marker(
-                        ctx,
-                        &grid,
-                        s.sub_point.lon_deg,
-                        s.sub_point.lat_deg,
-                        &MarkerLabel { glyph: "◆", color: Theme::SAT, name: tr.name(), detail: None },
-                    );
-                }
-                None => {
-                    ctx.print(
-                        x_bounds[0] + (x_bounds[1] - x_bounds[0]) * 0.30,
-                        0.0,
-                        Span::styled(
-                            "acquiring element set…",
-                            Style::new().fg(Theme::LABEL),
-                        ),
-                    );
-                }
-            }
-        });
+    // Footprint before the tracks, same layer: a GEO ring crosses the ground
+    // track several times, and the last write to a cell wins, so drawing it
+    // first lets the track stay continuous through every crossing rather than
+    // being punched through by the ring.
+    if let Some(segments) = &scene.footprint {
+        draw_polyline(ctx, segments, Theme::FOOTPRINT);
+    }
+    if let Some(segments) = &scene.track_past {
+        draw_polyline(ctx, segments, Theme::TRACK_PAST);
+    }
+    if let Some(segments) = &scene.track_future {
+        draw_polyline(ctx, segments, Theme::TRACK_FUTURE);
+    }
+    ctx.layer();
 
-    frame.render_widget(canvas, area);
+    if let Some(g) = scene.station {
+        if grid.contains(g.lon_deg) {
+            ctx.print(
+                g.lon_deg,
+                g.lat_deg,
+                Span::styled("▲", Style::new().fg(Theme::STATION).bold()),
+            );
+        }
+    }
+
+    // The highlighted launch's pad, drawn before the satellite so the
+    // satellite marker wins if the two ever coincide. The label leads with
+    // the provider — a short, stable field that survives truncation on a
+    // narrow map, unlike the often much longer vehicle/mission name — except
+    // when the feed didn't know it.
+    if let Some(p) = &scene.pad {
+        let label = if p.provider.is_empty() || p.provider == "—" {
+            p.vehicle.to_string()
+        } else {
+            format!("{} · {}", p.provider, p.vehicle)
+        };
+        let detail = format!("{} · {}", p.site, fmt_coords(p.lat, p.lon));
+        print_marker(
+            ctx,
+            grid,
+            p.lon,
+            p.lat,
+            &MarkerLabel { glyph: "◉", color: Theme::PAD, name: &label, detail: Some(&detail) },
+        );
+    }
+
+    match scene.sat {
+        Some((tr, s)) => {
+            print_marker(
+                ctx,
+                grid,
+                s.sub_point.lon_deg,
+                s.sub_point.lat_deg,
+                &MarkerLabel { glyph: "◆", color: Theme::SAT, name: tr.name(), detail: None },
+            );
+        }
+        None => {
+            // `sat` is `None` only when follow mode is off, so this is always
+            // the single whole-world pane — one placeholder, anchored 30% in.
+            ctx.print(
+                grid.x[0] + (grid.x[1] - grid.x[0]) * 0.30,
+                0.0,
+                Span::styled("acquiring element set…", Style::new().fg(Theme::LABEL)),
+            );
+        }
+    }
+}
+
+/// One horizontal slice of the map panel: the cells it covers and the *real*
+/// longitude range drawn in them. Away from the dateline there is a single
+/// pane covering all of `inner`; a follow window that runs past ±180° is cut
+/// into two that tile `inner` exactly and share one degrees-per-column.
+struct Pane {
+    rect: Rect,
+    x: [f64; 2],
+}
+
+/// Split `inner` into map panes for a window spanning the longitudes `x`.
+///
+/// The cut is made on a whole-column boundary so the two panes line up
+/// seamlessly, and each pane's bounds are the real longitudes of its own
+/// columns — the wrapped pane's shifted by ∓360° — so every shape can still
+/// be drawn straight from the `[-180, 180)` geometry with no re-projection
+/// and ratatui's own clipping drops whatever falls outside a pane.
+fn panes(inner: Rect, x: [f64; 2]) -> Vec<Pane> {
+    let cols = inner.width;
+    let span = x[1] - x[0];
+    // A degenerate grid, or a window that stays on the map: a single pane,
+    // byte-for-byte the pre-split single-canvas render.
+    if cols < 2 || span <= 0.0 || (x[0] >= -180.0 && x[1] <= 180.0) {
+        return vec![Pane { rect: inner, x }];
+    }
+    let d = span / (cols - 1) as f64;
+
+    // A pane covering panel columns `a..b`: its rect is that column range, its
+    // bounds are those columns' longitudes with `shift` (0 or ±360°) applied.
+    // A one-column pane would otherwise get a zero-width span that
+    // `Painter::get_point` rejects outright, so widen it to one column's worth.
+    let pane = |a: u16, b: u16, shift: f64| {
+        let lo = x[0] + a as f64 * d + shift;
+        let hi = x[0] + (b - 1) as f64 * d + shift;
+        Pane {
+            rect: Rect::new(inner.x + a, inner.y, b - a, inner.height),
+            x: if hi - lo > 0.0 { [lo, hi] } else { [lo - d / 2.0, lo + d / 2.0] },
+        }
+    };
+
+    if x[1] > 180.0 {
+        // Centre east of +90°: the leading columns up to +180° stay put, the
+        // rest wrap onto the −180° edge.
+        let cut = (((180.0 - x[0]) / d).floor() as u16 + 1).clamp(1, cols - 1);
+        vec![pane(0, cut, 0.0), pane(cut, cols, -360.0)]
+    } else {
+        // Centre west of −90°: the leading columns below −180° wrap onto the
+        // +180° edge, the rest stay put.
+        let cut = (((-180.0 - x[0]) / d).ceil() as u16).clamp(1, cols - 1);
+        vec![pane(0, cut, 360.0), pane(cut, cols, 0.0)]
+    }
 }
 
 /// Night and civil-twilight cells of the map, one sample per canvas cell.
@@ -274,6 +357,17 @@ impl Grid {
         }
         self.y[1] - row as f64 * self.deg_per_row()
     }
+
+    /// Whether longitude `x` falls within this grid's window. When the follow
+    /// view is split across the dateline each pane's paint closure still sees
+    /// every marker, so a marker is skipped unless the pane it belongs to is
+    /// the one drawing it — without this the left-label branch of
+    /// [`print_marker`] would draw at an in-bounds column and leave a stray
+    /// label pinned to a pane edge.
+    fn contains(&self, x: f64) -> bool {
+        let (lo, hi) = (self.x[0].min(self.x[1]), self.x[0].max(self.x[1]));
+        x >= lo && x <= hi
+    }
 }
 
 /// A one-glyph marker plus a name label beside it, and an optional dimmer
@@ -290,6 +384,15 @@ struct MarkerLabel<'a> {
 /// `ctx.print` call per line — nothing gets drawn over the glyph — and it
 /// isn't clipped by an edge the way a label fixed to one side would be.
 fn print_marker(ctx: &mut Context<'_>, grid: &Grid, lon: f64, lat: f64, marker: &MarkerLabel<'_>) {
+    // Not in this pane's window: leave it to the pane that does hold it. This
+    // also fixes a pre-existing glitch — a pad far outside a narrow follow
+    // window used to have its label drawn pinned to the map edge, because
+    // `col_of` saturated to the last column and the label then flipped left
+    // onto an in-bounds coordinate.
+    if !grid.contains(lon) {
+        return;
+    }
+
     let MarkerLabel { glyph, color, name, detail } = *marker;
     let cols = grid.cols();
     let glyph_span = || Span::styled(glyph.to_string(), Style::new().fg(color).bold());
@@ -471,5 +574,94 @@ mod tests {
         assert_eq!(fmt_coords(40.958, 100.298), "40.96°N 100.30°E");
         assert_eq!(fmt_coords(-34.632, -120.611), "34.63°S 120.61°W");
         assert_eq!(fmt_coords(0.0, 0.0), "0.00°N 0.00°E");
+    }
+
+    /// A map-panel rect `cols` wide, tall enough that the height is never the
+    /// thing under test.
+    fn inner_rect(cols: u16) -> Rect {
+        Rect::new(0, 0, cols, 20)
+    }
+
+    #[test]
+    fn grid_contains_rejects_a_longitude_outside_the_window() {
+        let g = Grid { inner: Rect::new(0, 0, 50, 10), x: [85.0, 180.0], y: [-90.0, 90.0] };
+        assert!(g.contains(85.0) && g.contains(90.0) && g.contains(180.0));
+        assert!(!g.contains(80.0));
+        assert!(!g.contains(-100.0));
+    }
+
+    #[test]
+    fn panes_are_a_single_pane_when_the_window_stays_inside_the_map() {
+        let whole = panes(inner_rect(100), [-180.0, 180.0]);
+        assert_eq!(whole.len(), 1);
+        assert_eq!(whole[0].rect, inner_rect(100));
+        assert_eq!(whole[0].x, [-180.0, 180.0]);
+
+        // A follow window that doesn't reach the dateline is one pane too.
+        let zoomed = panes(inner_rect(100), [-40.0, 140.0]);
+        assert_eq!(zoomed.len(), 1);
+        assert_eq!(zoomed[0].x, [-40.0, 140.0]);
+    }
+
+    #[test]
+    fn panes_of_a_degenerate_grid_are_a_single_pane() {
+        assert_eq!(panes(inner_rect(1), [85.0, 265.0]).len(), 1);
+        assert_eq!(panes(Rect::new(0, 0, 0, 20), [85.0, 265.0]).len(), 1);
+    }
+
+    #[test]
+    fn panes_split_at_the_dateline_and_tile_the_inner_width_exactly() {
+        // Every centre whose ±90° window crosses a dateline edge, east or west.
+        for centre in [175.0, -175.0, 130.0, -95.0] {
+            let ps = panes(inner_rect(120), [centre - 90.0, centre + 90.0]);
+            assert_eq!(ps.len(), 2, "centre {centre}");
+            assert_eq!(ps[0].rect.x, 0);
+            assert_eq!(ps[1].rect.x, ps[0].rect.width, "panes are contiguous");
+            assert_eq!(ps[0].rect.width + ps[1].rect.width, 120, "panes fill the width");
+            assert!(ps.iter().all(|p| p.rect.width >= 1 && p.rect.height == 20));
+        }
+    }
+
+    #[test]
+    fn panes_hold_a_uniform_degrees_per_column_across_the_seam() {
+        let ps = panes(inner_rect(100), [85.0, 265.0]);
+        let deg_per_col = |p: &Pane| (p.x[1] - p.x[0]) / (p.rect.width - 1) as f64;
+        assert!((deg_per_col(&ps[0]) - deg_per_col(&ps[1])).abs() < 1e-9);
+        assert!((deg_per_col(&ps[0]) - 180.0 / 99.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn panes_cover_the_windows_longitudes_once_each() {
+        // Centre 175°E: the near half reaches from 85°E to +180°, the wrapped
+        // half from −180° to −95° (i.e. on to 265°E). Together they cover the
+        // 180°-wide window with nothing drawn twice.
+        let ps = panes(inner_rect(100), [85.0, 265.0]);
+        let (near, wrapped) = (&ps[0], &ps[1]);
+        assert!((near.x[0] - 85.0).abs() < 2.0 && near.x[1] <= 180.0 + 1e-9);
+        assert!(wrapped.x[0] >= -180.0 - 1e-9 && (wrapped.x[1] - -95.0).abs() < 2.0);
+    }
+
+    #[test]
+    fn the_satellite_lands_on_the_centre_column_at_every_longitude() {
+        // The whole point of follow mode: sweep the sub-point across the full
+        // range of longitudes and the satellite's panel column never drifts
+        // more than a cell off centre — the invariant the old ±90° clamp
+        // broke near the dateline.
+        let cols = 101u16;
+        let centre_col = i32::from((cols - 1) / 2);
+        for step in 0..=72 {
+            let lon = -180.0 + f64::from(step) * 5.0;
+            let ps = panes(inner_rect(cols), [lon - 90.0, lon + 90.0]);
+            let holder = ps
+                .iter()
+                .find(|p| Grid { inner: p.rect, x: p.x, y: [-90.0, 90.0] }.contains(lon))
+                .expect("some pane holds the sub-point");
+            let g = Grid { inner: holder.rect, x: holder.x, y: [-90.0, 90.0] };
+            let panel_col = i32::from(holder.rect.x + g.col_of(lon));
+            assert!(
+                (panel_col - centre_col).abs() <= 1,
+                "lon {lon}: column {panel_col} vs centre {centre_col}"
+            );
+        }
     }
 }

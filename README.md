@@ -155,8 +155,9 @@ age of the element set since its epoch. The title bar also shows the
 satellite's COSPAR international designator next to its NORAD id, when the
 terminal is wide enough to fit it.
 
-**Map** — the whole world by default; `f` zooms to a window that follows the
-satellite. `◆` sub-satellite point · `▲` ground station · `◉` pad of the launch
+**Map** — the whole world by default; `f` zooms to a 180°×90° window centred on
+the satellite, wrapping across the dateline to keep it dead centre. `◆`
+sub-satellite point · `▲` ground station · `◉` pad of the launch
 currently highlighted in Launches, with its provider, site and coordinates.
 
 **Space weather** (NOAA SWPC) — `Kp` planetary K-index, 0–9 · `WIND` solar wind
