@@ -87,7 +87,7 @@ fn content(app: &App) -> Vec<Line<'static>> {
     row(&mut l, "▲", "your ground station");
     row(&mut l, "bright line", "the next 65 minutes of ground track");
     row(&mut l, "dim line", "the past 35 minutes of ground track");
-    row(&mut l, "circle", "the visibility footprint — where the satellite is above 0°");
+    row(&mut l, "violet ring", "the visibility footprint — where the satellite is above 0°");
     row(&mut l, "amber dots", "the day/night terminator");
     row(&mut l, "dark ground", "the night side of the Earth");
     row(&mut l, "lighter band", "civil twilight — the Sun 0°–6° below the horizon");

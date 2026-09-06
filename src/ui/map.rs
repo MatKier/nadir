@@ -6,11 +6,11 @@ use ratatui::layout::Rect;
 use ratatui::style::{Color, Style};
 use ratatui::symbols::Marker;
 use ratatui::text::{Line, Span};
-use ratatui::widgets::canvas::{Canvas, Circle, Context, Line as CanvasLine, Map, MapResolution, Points};
+use ratatui::widgets::canvas::{Canvas, Context, Line as CanvasLine, Map, MapResolution, Points};
 use ratatui::Frame;
 
 use crate::app::{App, Panel};
-use crate::geo::GeoPoint;
+use crate::geo::{footprint_ring, GeoPoint};
 use crate::orbit::solar::{terminator_polyline, SunGeometry, CIVIL_TWILIGHT_DEG};
 use crate::orbit::{SatState, Tracker};
 use crate::ui::panels::truncate;
@@ -48,6 +48,11 @@ pub fn draw(
     let track_past = sat.map(|(tr, _)| {
         tr.ground_track(now, Duration::minutes(35), Duration::zero(), Duration::seconds(20))
     });
+    // The visibility footprint as a great-circle ring, split at the ±180°
+    // meridian like the tracks are — a spherical cap, so it bulges in
+    // longitude towards the poles rather than staying a projected circle, and
+    // its far half wraps onto the opposite map edge instead of being clipped.
+    let footprint = sat.map(|(_, s)| footprint_ring(&s.sub_point, s.footprint_km, 180));
 
     let (night, twilight) = night_wash(&grid, now);
 
@@ -90,6 +95,13 @@ pub fn draw(
                 color: Theme::CAUTION,
             });
 
+            // Footprint before the tracks, same layer: a GEO ring crosses the
+            // ground track several times, and the last write to a cell wins, so
+            // drawing it first lets the track stay continuous through every
+            // crossing rather than being punched through by the ring.
+            if let Some(segments) = &footprint {
+                draw_polyline(ctx, segments, Theme::FOOTPRINT);
+            }
             if let Some(segments) = &track_past {
                 draw_polyline(ctx, segments, Theme::TRACK_PAST);
             }
@@ -97,16 +109,6 @@ pub fn draw(
                 draw_polyline(ctx, segments, Theme::TRACK_FUTURE);
             }
             ctx.layer();
-
-            if let Some((_, s)) = sat {
-                let radius_deg = (s.footprint_km / 111.32).min(160.0);
-                ctx.draw(&Circle {
-                    x: s.sub_point.lon_deg,
-                    y: s.sub_point.lat_deg,
-                    radius: radius_deg,
-                    color: Theme::TRACK_FUTURE,
-                });
-            }
 
             if let Some(g) = station {
                 ctx.print(

@@ -3,7 +3,7 @@
 use anyhow::{anyhow, Context, Result};
 use chrono::{DateTime, Utc};
 
-use crate::geo::{dot, ecef_to_geodetic, norm, teme_to_ecef, GeoPoint};
+use crate::geo::{dot, ecef_to_geodetic, norm, split_at_antimeridian, teme_to_ecef, GeoPoint};
 use crate::orbit::solar::{subsolar_point, sun_ecef_unit};
 
 /// Everything nadir needs about the satellite at one instant.
@@ -399,8 +399,10 @@ impl Tracker {
     }
 
     /// Sub-satellite points over `[now - before, now + after]`, split into
-    /// polyline segments wherever the track crosses the ±180° meridian so the
-    /// map never draws a spurious streak across the world.
+    /// polyline segments wherever the track crosses the ±180° meridian
+    /// ([`split_at_antimeridian`]) so the map never draws a spurious streak
+    /// across the world. A step whose propagation fails is skipped, leaving a
+    /// time gap but never a false longitude jump.
     pub fn ground_track(
         &self,
         now: DateTime<Utc>,
@@ -408,29 +410,16 @@ impl Tracker {
         after: chrono::Duration,
         step: chrono::Duration,
     ) -> Vec<Vec<GeoPoint>> {
-        let mut segments: Vec<Vec<GeoPoint>> = vec![Vec::new()];
+        let mut points = Vec::new();
         let mut t = now - before;
         let end = now + after;
-        let mut prev_lon: Option<f64> = None;
-
         while t <= end {
             if let Ok(state) = self.state_at(t) {
-                let lon = state.sub_point.lon_deg;
-                if let Some(p) = prev_lon {
-                    if (lon - p).abs() > 180.0 {
-                        segments.push(Vec::new());
-                    }
-                }
-                prev_lon = Some(lon);
-                if let Some(seg) = segments.last_mut() {
-                    seg.push(state.sub_point);
-                }
+                points.push(state.sub_point);
             }
             t += step;
         }
-
-        segments.retain(|s| s.len() > 1);
-        segments
+        split_at_antimeridian(points)
     }
 }
 
