@@ -189,6 +189,81 @@ pub fn great_circle_km(a: &GeoPoint, b: &GeoPoint) -> f64 {
     2.0 * WGS84_A_KM * h.sqrt().asin()
 }
 
+/// The point reached by leaving `from` on compass `bearing_rad` (clockwise from
+/// north) and travelling `angular_dist_rad` radians of arc along that great
+/// circle. Altitude is carried through unchanged.
+///
+/// [`crate::orbit::solar::terminator_polyline`] is the `angular_dist_rad = π/2`
+/// special case of this, written out by hand there because at exactly a quarter
+/// turn the `sin`/`cos` of the distance collapse to 1/0 and several terms drop.
+pub fn destination_point(from: &GeoPoint, bearing_rad: f64, angular_dist_rad: f64) -> GeoPoint {
+    let lat1 = from.lat_deg.to_radians();
+    let lon1 = from.lon_deg.to_radians();
+    let (sin_d, cos_d) = angular_dist_rad.sin_cos();
+    let (sin_lat1, cos_lat1) = lat1.sin_cos();
+    let (sin_brg, cos_brg) = bearing_rad.sin_cos();
+
+    let sin_lat2 = (sin_lat1 * cos_d + cos_lat1 * sin_d * cos_brg).clamp(-1.0, 1.0);
+    let lat2 = sin_lat2.asin();
+    let lon2 = lon1 + (sin_brg * sin_d * cos_lat1).atan2(cos_d - sin_lat1 * sin_lat2);
+
+    GeoPoint {
+        lat_deg: lat2.to_degrees(),
+        lon_deg: wrap_longitude(lon2.to_degrees()),
+        alt_km: from.alt_km,
+    }
+}
+
+/// Break a polyline into segments wherever two consecutive points jump more
+/// than 180° of longitude — where the line crosses the ±180° meridian and
+/// would otherwise be drawn as a spurious streak straight across the map.
+/// Segments left with fewer than two points (nothing to draw a line through)
+/// are dropped, so the result can be empty.
+pub fn split_at_antimeridian(points: Vec<GeoPoint>) -> Vec<Vec<GeoPoint>> {
+    let mut segments: Vec<Vec<GeoPoint>> = vec![Vec::new()];
+    let mut prev_lon: Option<f64> = None;
+    for p in points {
+        if let Some(prev) = prev_lon {
+            if (p.lon_deg - prev).abs() > 180.0 {
+                segments.push(Vec::new());
+            }
+        }
+        prev_lon = Some(p.lon_deg);
+        segments.last_mut().expect("segments always holds at least one Vec").push(p);
+    }
+    segments.retain(|s| s.len() > 1);
+    segments
+}
+
+/// The visibility-footprint boundary as a drawable polyline: the circle of
+/// surface points exactly `radius_km` of great-circle distance from `centre`,
+/// sampled at `n` points around the ring (the sample count also closes it back
+/// onto its start) and split at the antimeridian by [`split_at_antimeridian`].
+///
+/// `radius_km` is the same value `SatState::footprint_km` carries; the central
+/// angle is recovered as `radius_km / WGS84_A_KM`, the exact inverse of how
+/// that field is computed in `Tracker::state_at`, so the ring and the numeric
+/// readout can never drift apart.
+///
+/// The boundary is a small circle on the sphere, *not* a circle in the map's
+/// equirectangular projection — it bulges wider in longitude the further it
+/// reaches from the equator. When the cap covers a pole its longitudes sweep
+/// the full range and it draws as an open curve skirting the pole rather than a
+/// closed loop, which is the correct outline of that region; a sample pair
+/// straddling the pole can still leave a near-horizontal streak at extreme
+/// latitude — the same limitation the ground track carries at the dateline.
+pub fn footprint_ring(centre: &GeoPoint, radius_km: f64, n: usize) -> Vec<Vec<GeoPoint>> {
+    let ground = GeoPoint { lat_deg: centre.lat_deg, lon_deg: centre.lon_deg, alt_km: 0.0 };
+    let angular = radius_km / WGS84_A_KM;
+    let ring = (0..=n)
+        .map(|i| {
+            let bearing = (i as f64 / n as f64) * std::f64::consts::TAU;
+            destination_point(&ground, bearing, angular)
+        })
+        .collect();
+    split_at_antimeridian(ring)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -246,5 +321,133 @@ mod tests {
         let la = look_angles(&obs, target);
         assert!((la.elevation_deg - 90.0).abs() < 1e-6, "{la:?}");
         assert!((la.range_km - 500.0).abs() < 1e-6, "{la:?}");
+    }
+
+    use std::f64::consts::{PI, TAU};
+
+    /// Flatten a single-segment ring for the assertions that don't care about
+    /// splitting; panics if the ring came back split so a test can't silently
+    /// pass on half the points.
+    fn one_segment(segments: Vec<Vec<GeoPoint>>) -> Vec<GeoPoint> {
+        assert_eq!(segments.len(), 1, "expected a single unsplit segment");
+        segments.into_iter().next().unwrap()
+    }
+
+    #[test]
+    fn destination_point_travels_the_requested_great_circle_distance() {
+        let from = GeoPoint::new(48.0, 11.0, 0.0);
+        let dist_km = 3000.0;
+        let angular = dist_km / WGS84_A_KM;
+        for i in 0..12 {
+            let bearing = i as f64 / 12.0 * TAU;
+            let to = destination_point(&from, bearing, angular);
+            assert!(
+                (great_circle_km(&from, &to) - dist_km).abs() < 1e-3,
+                "bearing {bearing}: {to:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn destination_point_at_ninety_degrees_matches_the_terminator_construction() {
+        // `terminator_polyline` hand-rolls the quarter-turn case; the general
+        // formula must agree with it point for point.
+        let centre = GeoPoint::new(15.0, -60.0, 0.0);
+        let lat_s = centre.lat_deg.to_radians();
+        let lon_s = centre.lon_deg.to_radians();
+        let (sin_lat_s, cos_lat_s) = lat_s.sin_cos();
+        for i in 0..16 {
+            let bearing = i as f64 / 16.0 * TAU;
+            let lat = (cos_lat_s * bearing.cos()).asin();
+            let lon = lon_s + (bearing.sin() * cos_lat_s).atan2(-sin_lat_s * lat.sin());
+            let collapsed = GeoPoint {
+                lat_deg: lat.to_degrees(),
+                lon_deg: wrap_longitude(lon.to_degrees()),
+                alt_km: 0.0,
+            };
+            let general = destination_point(&centre, bearing, PI / 2.0);
+            assert!((general.lat_deg - collapsed.lat_deg).abs() < 1e-9, "{general:?} {collapsed:?}");
+            assert!((general.lon_deg - collapsed.lon_deg).abs() < 1e-9, "{general:?} {collapsed:?}");
+        }
+    }
+
+    #[test]
+    fn footprint_ring_points_all_sit_one_footprint_radius_from_the_centre() {
+        let centre = GeoPoint::new(50.0, 10.0, 420.0);
+        let ground = GeoPoint::new(centre.lat_deg, centre.lon_deg, 0.0);
+        let radius_km = 2200.0;
+        for p in one_segment(footprint_ring(&centre, radius_km, 180)) {
+            assert!(
+                (great_circle_km(&ground, &p) - radius_km).abs() < 0.5,
+                "{p:?} is {:.3} km from the centre",
+                great_circle_km(&ground, &p)
+            );
+        }
+    }
+
+    #[test]
+    fn footprint_ring_is_a_single_segment_away_from_the_dateline() {
+        // ISS-sized footprint over Europe: nowhere near ±180°, so one segment.
+        let segments = footprint_ring(&GeoPoint::new(50.0, 10.0, 420.0), 2200.0, 180);
+        assert_eq!(segments.len(), 1);
+    }
+
+    #[test]
+    fn footprint_ring_wraps_across_the_dateline() {
+        // Centre just east of the antimeridian, footprint straddling it: the
+        // ring has to break into at least two segments, and between them the
+        // returned points must reach both the +180° and the −180° edge rather
+        // than one half being clipped away.
+        let segments = footprint_ring(&GeoPoint::new(0.0, 179.0, 420.0), 2200.0, 180);
+        assert!(segments.len() >= 2, "expected a split ring, got {}", segments.len());
+        let all: Vec<f64> = segments.iter().flatten().map(|p| p.lon_deg).collect();
+        assert!(all.iter().any(|&l| l > 170.0), "no points near the +180° edge: {all:?}");
+        assert!(all.iter().any(|&l| l < -170.0), "no points near the −180° edge: {all:?}");
+    }
+
+    #[test]
+    fn footprint_ring_segments_never_jump_the_dateline() {
+        // Mirrors `ground_track_splits_at_the_antimeridian`: within a segment no
+        // adjacent pair may span ≥180° of longitude.
+        let segments = footprint_ring(&GeoPoint::new(0.0, 179.0, 420.0), 2200.0, 180);
+        for seg in &segments {
+            for w in seg.windows(2) {
+                assert!(
+                    (w[0].lon_deg - w[1].lon_deg).abs() < 180.0,
+                    "segment jumps the dateline: {:?} -> {:?}",
+                    w[0],
+                    w[1]
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn footprint_ring_at_the_equator_spans_the_full_central_angle() {
+        // A GEO-sized cap on the equator reaches ±(central angle) in both lat
+        // and lon at its extremes — the one latitude where the projected shape
+        // and a naive circle happen to agree.
+        let radius_km = 9050.0;
+        let central_deg = (radius_km / WGS84_A_KM).to_degrees();
+        let pts = one_segment(footprint_ring(&GeoPoint::new(0.0, 0.0, 35_786.0), radius_km, 180));
+        let max_lon = pts.iter().map(|p| p.lon_deg.abs()).fold(0.0_f64, f64::max);
+        let max_lat = pts.iter().map(|p| p.lat_deg.abs()).fold(0.0_f64, f64::max);
+        assert!((max_lon - central_deg).abs() < 1.0, "max lon {max_lon} vs {central_deg}");
+        assert!((max_lat - central_deg).abs() < 1.0, "max lat {max_lat} vs {central_deg}");
+    }
+
+    #[test]
+    fn footprint_ring_bulges_in_longitude_at_high_centre_latitude() {
+        // The spherical cap is not a projected circle: centred at 70°N a
+        // ~22° cap sweeps far more than ±22° of longitude at its own latitude,
+        // which the old Euclidean `Circle` could never show.
+        let radius_km = 2500.0;
+        let central_deg = (radius_km / WGS84_A_KM).to_degrees();
+        let pts = one_segment(footprint_ring(&GeoPoint::new(70.0, 0.0, 780.0), radius_km, 180));
+        let max_lon = pts.iter().map(|p| p.lon_deg.abs()).fold(0.0_f64, f64::max);
+        assert!(
+            max_lon > central_deg * 1.5,
+            "max lon {max_lon} did not exceed 1.5x the central angle {central_deg}"
+        );
     }
 }

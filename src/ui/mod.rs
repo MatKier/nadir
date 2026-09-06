@@ -29,6 +29,13 @@ impl Theme {
     pub const SAT: Color = Color::Rgb(255, 240, 150);
     pub const TRACK_FUTURE: Color = Color::Rgb(120, 200, 240);
     pub const TRACK_PAST: Color = Color::Rgb(70, 100, 120);
+    // The visibility footprint. It shared TRACK_FUTURE's blue back when it was
+    // an unmistakable circle and its shape did the distinguishing; now that it
+    // is a real spherical cap — a long projected lens that at GEO sweeps most
+    // of the map — a matching hue reads as more track. Violet is the one lane
+    // the map has left: PAD's pink is the nearest neighbour but only ever a
+    // single glyph, never a line this length.
+    pub const FOOTPRINT: Color = Color::Rgb(175, 155, 235);
     // Now painted as a solid cell background rather than sparse foreground
     // dots (see ui::map), so both need to sit well below COAST's brightness
     // or the coastline stops reading as land against them.
