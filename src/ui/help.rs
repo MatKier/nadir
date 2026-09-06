@@ -93,7 +93,8 @@ fn content(app: &App) -> Vec<Line<'static>> {
     row(&mut l, "lighter band", "civil twilight — the Sun 0°–6° below the horizon");
     row(&mut l, "◉", "pad of the highlighted launch, with its provider, site and coordinates — see below");
     text(&mut l, "The map shows the whole world; `f` zooms it to a 180°×90° window");
-    text(&mut l, "that follows the satellite, and `m` expands it to fill the screen.");
+    text(&mut l, "centred on the satellite, wrapping across the dateline to keep it");
+    text(&mut l, "dead centre, and `m` expands the map to fill the screen.");
     blank(&mut l);
 
     heading(&mut l, "Tracked");
