@@ -13,7 +13,9 @@ use crate::source::Health;
 use crate::ui::panels::fmt::{dim, footer, row_highlight, truncate};
 use crate::ui::{is_focused, panel_block, Theme};
 
-pub fn draw(frame: &mut Frame, area: Rect, app: &App, data: &AppData, now: DateTime<Utc>) {
+/// `wall_now`, not the simulated clock: a launch countdown tracks a real
+/// scheduled event, so scrubbing the display time must not move it.
+pub fn draw(frame: &mut Frame, area: Rect, app: &App, data: &AppData, wall_now: DateTime<Utc>) {
     let mut block = panel_block(Panel::Launches, "LAUNCHES", is_focused(app, Panel::Launches));
     // Note where the launch list actually came from, when it isn't a live
     // pull from the primary host — the mirror or the disk cache.
@@ -45,7 +47,7 @@ pub fn draw(frame: &mut Frame, area: Rect, app: &App, data: &AppData, now: DateT
             // not), then reused per row below.
             let countdowns: Vec<(String, Color)> = list
                 .iter()
-                .map(|l| match l.t_minus(now) {
+                .map(|l| match l.t_minus(wall_now) {
                     Some(d) if d.num_seconds() >= 0 => (fmt_countdown(d), Theme::ACCENT),
                     Some(_) => ("in flight".to_string(), Theme::CAUTION),
                     None => ("TBD".to_string(), Theme::LABEL),

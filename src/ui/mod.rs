@@ -73,7 +73,11 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
         return;
     }
 
-    let now = Utc::now();
+    // The simulated clock drives everything about the satellite; `wall_now` is
+    // kept separate for the few things that must not scrub (the launch
+    // countdown).
+    let now = app.sim_now();
+    let wall_now = Utc::now();
     let data = match app.data.read() {
         Ok(d) => d,
         Err(_) => return,
@@ -128,15 +132,18 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
         title_bar(frame, title, app, &data);
         map::draw(frame, map_area, app, sat_state.as_ref(), now, pad);
         panels::tracked::draw(frame, tracked, app);
-        panels::telemetry::draw(frame, telem, app, sat_state.as_ref(), now);
+        panels::telemetry::draw(frame, telem, app, sat_state.as_ref(), data.tle.get().is_some(), now);
         panels::passes::draw(frame, passes, app, now);
         panels::weather::draw(frame, weather, app, &data);
-        panels::launches::draw(frame, launches, app, &data, now);
+        panels::launches::draw(frame, launches, app, &data, wall_now);
         status_bar(frame, status, app, &data);
     }
 
     if let Some(picker) = &app.sat_input {
         sat_input_popup(frame, area, picker, &data.search);
+    }
+    if let Some(input) = &app.time_input {
+        time_input_popup(frame, area, input);
     }
 
     drop(data);
@@ -162,13 +169,41 @@ fn right_column_heights(total: u16, tracked_rows: u16, telem_h: u16) -> (u16, u1
     (tracked_h, telem_h)
 }
 
+/// The title-bar transport marker for the simulated clock, and whether the
+/// clock is locked to wall time (which colours it and the clock green rather
+/// than amber). Single-width geometric glyphs only, from the same family as the
+/// map's `◆ ◇ ◉ ★` — an emoji would render two columns wide and the title bar
+/// measures everything with `chars().count()`.
+fn clock_marker(clock: &crate::simclock::SimClock) -> (String, bool) {
+    use crate::simclock::ClockState;
+    match clock.state() {
+        ClockState::Live => ("▸ ".to_string(), true),
+        ClockState::Drifted => ("▸ ".to_string(), false),
+        ClockState::Paused => ("‖ ".to_string(), false),
+        ClockState::Warp(-1) => ("◂ ".to_string(), false),
+        ClockState::Warp(r) if r <= -2 => (format!("◂◂{}x ", -r), false),
+        ClockState::Warp(r) => (format!("▸▸{r}x "), false),
+    }
+}
+
 fn title_bar(frame: &mut Frame, area: Rect, app: &App, data: &crate::app::AppData) {
-    let coords = match app.config.ground_station() {
+    let coords_full = match app.config.ground_station() {
         Some(g) => format!("{:.3},{:.3}", g.lat_deg, g.lon_deg),
         None => "no ground station".to_string(),
     };
-    let up = format!("  up {}  ", crate::source::fmt_age(app.uptime()));
-    let clock = Utc::now().format("%Y-%m-%d %H:%M:%SZ").to_string();
+    let coords_short = match app.config.ground_station() {
+        Some(g) => format!("{:.1},{:.1}", g.lat_deg, g.lon_deg),
+        None => "no ground station".to_string(),
+    };
+    let up_full = format!("  up {}  ", crate::source::fmt_age(app.uptime()));
+
+    // The clock shows the *simulated* instant, not wall time. `marker` is its
+    // transport state (`▸` live, `‖` paused, `▸▸60x` / `◂◂5x` warp); `live`
+    // greens both marker and clock when the two coincide, and only then.
+    let clock = app.sim_now().format("%Y-%m-%d %H:%M:%SZ").to_string();
+    let (marker, live) = clock_marker(&app.clock);
+    let clock_color = if live { Theme::NOMINAL } else { Theme::CAUTION };
+    let marker_w = marker.chars().count();
 
     // Budget for the ground-station name (e.g. "Munich, Bavaria, Germany"):
     // whatever's left of the title bar after the satellite label on the
@@ -181,14 +216,16 @@ fn title_bar(frame: &mut Frame, area: Rect, app: &App, data: &crate::app::AppDat
     // budget too small to say anything useful.
     const GAP: usize = 2;
     const PREFIX: &str = " nadir  ";
-    let right_fixed_len = coords.chars().count() + up.chars().count() + clock.chars().count() + 1;
+    let right_full =
+        coords_full.chars().count() + up_full.chars().count() + marker_w + clock.chars().count() + 1;
 
     // The COSPAR id is the first thing to go when the bar is tight: it is the
     // least-used of the three identifiers, and — same overlapping-paragraph
     // reason GAP exists — a left half that outgrows its share is silently
     // overwritten by the right-aligned one instead of wrapping, so it has to
     // be measured against the fixed right side before it's added rather than
-    // trimmed after the fact.
+    // trimmed after the fact. Measured against the *un-shed* right side: the
+    // uptime field and coordinate precision below give way before the id does.
     let sat = match data.tle.get() {
         Some(t) => {
             let base = format!("{} · NORAD {}", t.name(), t.norad_id());
@@ -196,7 +233,7 @@ fn title_bar(frame: &mut Frame, area: Rect, app: &App, data: &crate::app::AppDat
                 Some(id)
                     if PREFIX.chars().count() + base.chars().count() + " · ".chars().count()
                         + id.chars().count()
-                        + right_fixed_len
+                        + right_full
                         + GAP
                         <= area.width as usize =>
                 {
@@ -209,6 +246,22 @@ fn title_bar(frame: &mut Frame, area: Rect, app: &App, data: &crate::app::AppDat
     };
 
     let left_len = PREFIX.chars().count() + sat.chars().count();
+
+    // Once the id and the name have already gone, the scrub marker still has to
+    // fit: drop the session-uptime field to a single space, then coarsen the
+    // coordinates from 3 to 1 decimal, until the bare bar fits the width.
+    let mut up = up_full;
+    let mut coords = coords_full;
+    if left_len + right_full + GAP > area.width as usize {
+        let saved = up.chars().count() - 1;
+        up = " ".to_string();
+        if left_len + (right_full - saved) + GAP > area.width as usize {
+            coords = coords_short;
+        }
+    }
+
+    let right_fixed_len =
+        coords.chars().count() + up.chars().count() + marker_w + clock.chars().count() + 1;
     let name_budget = (area.width as usize)
         .saturating_sub(left_len + right_fixed_len + GAP)
         .saturating_sub(3);
@@ -228,7 +281,8 @@ fn title_bar(frame: &mut Frame, area: Rect, app: &App, data: &crate::app::AppDat
     let right = Line::from(vec![
         Span::styled(loc, Style::new().fg(Theme::LABEL)),
         Span::styled(up, Style::new().fg(Theme::LABEL)),
-        Span::styled(clock, Style::new().fg(Theme::ACCENT)),
+        Span::styled(marker, Style::new().fg(clock_color)),
+        Span::styled(clock, Style::new().fg(clock_color)),
         Span::raw(" "),
     ]);
     frame.render_widget(Paragraph::new(left), area);
@@ -264,6 +318,12 @@ fn status_bar(frame: &mut Frame, area: Rect, app: &App, data: &crate::app::AppDa
             "type a name or NORAD id · Enter search/track · ↑↓ select · Esc cancel".to_string(),
             "Enter search/track · ↑↓ select · Esc cancel".to_string(),
             "Enter search · Esc cancel".to_string(),
+        ]
+    } else if app.time_input.is_some() {
+        vec![
+            "a time or offset (2026-09-08 04:30 · 04:30 · +90m) · Enter go · Esc cancel".to_string(),
+            "e.g. +90m or 2026-09-08 04:30 · Enter go · Esc cancel".to_string(),
+            "Enter go · Esc cancel".to_string(),
         ]
     } else if app.show_help {
         vec!["j/k scroll · ? close".to_string(), "? close".to_string()]
@@ -304,7 +364,7 @@ fn key_hints(focus: Panel) -> Vec<String> {
     let mut tiers: Vec<String> = [
         &[
             "1-6 focus", "Tab", "m map", "f follow", "p places", "+/- zoom", "s sat", "r refresh",
-            "? help", "q quit",
+            "space pause", ",/. warp", "g goto", "? help", "q quit",
         ][..],
         &["1-6 focus", "m map", "f follow", "r refresh", "? help", "q quit"][..],
         &["r refresh", "? help", "q quit"][..],
@@ -477,6 +537,38 @@ fn sat_input_popup(frame: &mut Frame, area: Rect, picker: &crate::app::SatPicker
         Paragraph::new(lines).block(block).wrap(Wrap { trim: true }),
         popup,
     );
+}
+
+/// The `g` prompt: a small centred box that takes a time or an offset. Shares
+/// `centered` and the focus-frame idiom with `sat_input_popup`, but it is one
+/// input line and one hint line — nothing like the picker's result list — so it
+/// is its own function rather than a reuse of that one.
+fn time_input_popup(frame: &mut Frame, area: Rect, input: &crate::app::TimeInput) {
+    let popup = centered(area, 46, 6);
+    frame.render_widget(Clear, popup);
+    let block = Block::bordered()
+        .border_style(Style::new().fg(Theme::FRAME_FOCUS))
+        .title(" go to time ");
+    let hint = match &input.error {
+        Some(msg) => Line::from(Span::styled(format!("  {msg}"), Style::new().fg(Theme::ALERT))),
+        None => Line::from(Span::styled(
+            "  UTC · also +90m, -2h, +3d, or 04:30",
+            Style::new().fg(Theme::LABEL),
+        )),
+    };
+    let lines = vec![
+        Line::from(""),
+        Line::from(vec![
+            Span::styled("  time: ", Style::new().fg(Theme::LABEL)),
+            Span::styled(
+                format!("{}▏", input.buffer),
+                Style::new().fg(Theme::VALUE).add_modifier(Modifier::BOLD),
+            ),
+        ]),
+        Line::from(""),
+        hint,
+    ];
+    frame.render_widget(Paragraph::new(lines).block(block).wrap(Wrap { trim: true }), popup);
 }
 
 /// A rectangle of the given size, centred inside `area`.

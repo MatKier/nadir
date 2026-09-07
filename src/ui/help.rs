@@ -78,11 +78,30 @@ fn content(app: &App) -> Vec<Line<'static>> {
     row(&mut l, "q / Esc", "quit (Esc closes this help first)");
     blank(&mut l);
 
+    heading(&mut l, "Time");
+    text(&mut l, "The displayed clock can be detached from wall time — the whole map,");
+    text(&mut l, "telemetry, passes and the TLE-age warning then show that instant");
+    text(&mut l, "instead of now. Feed ages, the status chips and \"up\" never scrub, and");
+    text(&mut l, "neither does the launch countdown.");
+    row(&mut l, "Space", "pause / resume the clock");
+    row(&mut l, ", / .", "step the speed down / up — 1× 2× 5× 10× 60× 300× 1800×,");
+    text(&mut l, "     and past 1× straight into reverse (< / > do the same)");
+    row(&mut l, "← / →", "step the clock back / forward one minute (h / l too)");
+    row(&mut l, "[ / ]", "step the clock back / forward one hour");
+    row(&mut l, "n", "jump to 30 s before the next pass rises, paused there");
+    row(&mut l, "N", "same, but only naked-eye (★) passes");
+    row(&mut l, "g", "go to a time — an instant (2026-09-08 04:30), a clock time");
+    text(&mut l, "     (04:30, next occurrence) or an offset (+90m, -2h, +3d)");
+    row(&mut l, "0", "snap back to now, running at 1×");
+    blank(&mut l);
+
     heading(&mut l, "Title bar");
     text(&mut l, "Object name and NORAD catalogue number on the left, with the COSPAR");
     text(&mut l, "international designator (e.g. \"1998-067A\") between them when the");
     text(&mut l, "bar is wide enough to fit it; your ground station's lat/lon, session");
-    text(&mut l, "uptime (\"up\") and the UTC clock on the right.");
+    text(&mut l, "uptime (\"up\") and the clock on the right.");
+    text(&mut l, "The clock shows the simulated instant, green when it is live and amber");
+    text(&mut l, "with a marker when scrubbed: ▸ drifted, ‖ paused, ▸▸60x / ◂◂5x warp.");
     blank(&mut l);
 
     heading(&mut l, "Map");

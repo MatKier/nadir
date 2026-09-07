@@ -120,6 +120,12 @@ and will not work here.
 | `p` | toggle labelled cities and ground stations on the map |
 | `s` | search Celestrak's catalogue for another object, by name or NORAD id |
 | `r` | refresh the focused panel's feed(s) now |
+| `Space` | pause / resume the simulated clock |
+| `,` / `.` | step the clock speed down / up (1× … 1800×), past 1× into reverse (`<` / `>` too) |
+| `←` / `→` | step the clock ±1 minute (`h` / `l` too); `[` / `]` step ±1 hour |
+| `n` / `N` | jump to 30 s before the next pass / next naked-eye pass, paused there |
+| `g` | go to a time — `2026-09-08 04:30`, `04:30`, or an offset like `+90m` |
+| `0` | snap the clock back to now, running at 1× |
 | `?` | help — a scrollable in-app reference to every field, symbol and status chip |
 | `q` / `Esc` | quit |
 
@@ -130,6 +136,16 @@ and pressing `r` forces a fresh Kp/aurora pull without spending one of the launc
 feed's limited requests. Highlighting a launch expands its row to a second line
 with provider and pad, and marks the pad on the map with `◉` plus the provider,
 vehicle name, site and coordinates, for as long as the row stays highlighted.
+
+The clock keys detach the display from wall time so you can watch a pass play
+out, step to where the satellite will be, or run the ground track backwards.
+Everything geometric follows the simulated clock — the map, telemetry, the pass
+list, and the `TLE` age field's amber/red thresholds (accuracy really does decay
+that far from the epoch). What stays on the real clock: the feed-status chips and
+their ages, session uptime, and the launch countdown — those track real events,
+not the view. The title-bar clock turns amber with a marker (`▸` drifted, `‖`
+paused, `▸▸60x` / `◂◂5x` warp) whenever it is not live, so the display can never
+quietly claim to be current when it isn't.
 
 While the `?` overlay is open, `j`/`k`/`PgUp`/`PgDn`/`Home`/`End` scroll it
 instead, and `?` or `Esc` closes it.

@@ -5,7 +5,7 @@ use std::sync::{Arc, RwLock};
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
-use chrono::Utc;
+use chrono::{DateTime, Utc};
 use ratatui::crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use tokio::sync::{mpsc, watch, Notify};
 
@@ -16,6 +16,7 @@ use crate::api::swpc::{AuroraGrid, Indices};
 use crate::cache::Cache;
 use crate::config::Config;
 use crate::orbit::{predict_passes, Pass, Tracker};
+use crate::simclock::SimClock;
 use crate::source::Source;
 use crate::ui;
 
@@ -127,6 +128,15 @@ pub struct SatPicker {
     pub selected: usize,
 }
 
+/// State of the open "go to time" prompt (`g`): the raw text and the last parse
+/// error to show beneath the field, if any. Parsing lives in
+/// [`crate::simclock::parse_goto`].
+#[derive(Debug, Default)]
+pub struct TimeInput {
+    pub buffer: String,
+    pub error: Option<String>,
+}
+
 /// Renderer-owned UI state (not shared with fetch tasks).
 pub struct App {
     pub config: Config,
@@ -148,10 +158,18 @@ pub struct App {
     pub help_scroll: u16,
     pub should_quit: bool,
     pub started: Instant,
+    /// The displayed clock. Wall time until scrubbed; see [`SimClock`] and
+    /// [`App::sim_now`].
+    pub clock: SimClock,
     /// `Some` while the "track satellite" popup is open.
     pub sat_input: Option<SatPicker>,
+    /// `Some` while the "go to time" prompt is open.
+    pub time_input: Option<TimeInput>,
     pub passes: Vec<Pass>,
     passes_at: Option<Instant>,
+    /// The simulated instant `passes` was computed for, so a time scrub can
+    /// invalidate the list before its 20 s wall throttle would.
+    passes_from: Option<DateTime<Utc>>,
     sat_tx: watch::Sender<u64>,
     /// Submits a catalogue search query to the search task; a no-op send
     /// (nothing listening) in `--offline` mode, where submission is handled
@@ -168,6 +186,15 @@ impl App {
     /// Wall-clock time since the session started.
     pub fn uptime(&self) -> Duration {
         self.started.elapsed()
+    }
+
+    /// The instant the dashboard should draw — wall time, unless the clock has
+    /// been scrubbed. Everything about the satellite (position, track,
+    /// terminator, passes, the TLE-age thresholds) is a function of this;
+    /// feed ages, the status chips and `uptime` are not — they stay on the
+    /// real clock.
+    pub fn sim_now(&self) -> DateTime<Utc> {
+        self.clock.now()
     }
 
     /// Switch focus to `panel`, resetting list scroll — a scroll position
@@ -222,28 +249,48 @@ impl App {
         self.list_pos = next.clamp(0, max_index as i32) as usize;
     }
 
+    /// Drop the cached pass list so `refresh_passes` rebuilds it on the next
+    /// frame — after an explicit time jump the 20 s wall throttle is not the
+    /// right gate.
+    fn invalidate_passes(&mut self) {
+        self.passes_at = None;
+        self.passes_from = None;
+    }
+
     /// Recompute pass predictions if the cache is stale or the inputs changed.
     fn refresh_passes(&mut self) {
-        let due = self
+        let now = self.sim_now();
+        // A time scrub can move `now` well past the window the current list was
+        // built for without the 20 s wall throttle having elapsed. Recompute
+        // whenever the clock has drifted more than a few minutes from what
+        // `passes` reflects — the coarse 30 s scan in `predict_passes` means a
+        // few minutes of slop costs nothing.
+        let scrubbed = self
+            .passes_from
+            .is_none_or(|from| (now - from).abs() > chrono::Duration::minutes(5));
+        let stale = self
             .passes_at
             .map(|t| t.elapsed() > Duration::from_secs(20))
             .unwrap_or(true);
-        if !due {
+        if !scrubbed && !stale {
             return;
         }
         let Some(station) = self.config.ground_station() else {
             self.passes.clear();
             self.passes_at = Some(Instant::now());
+            self.passes_from = Some(now);
             return;
         };
         let tracker = self.data.read().ok().and_then(|d| d.tle.get().cloned());
         let Some(tr) = tracker else {
-            // No element set yet: leave `due` unset so we retry as soon as one
-            // arrives, rather than waiting out a full 20 s window for nothing.
+            // No element set yet: leave the throttle unset so we retry as soon
+            // as one arrives, rather than waiting out a full 20 s window for
+            // nothing.
             return;
         };
-        self.passes = predict_passes(&tr, &station, Utc::now(), chrono::Duration::hours(48), 12);
+        self.passes = predict_passes(&tr, &station, now, chrono::Duration::hours(48), 12);
         self.passes_at = Some(Instant::now());
+        self.passes_from = Some(now);
     }
 
     fn handle_key(&mut self, key: KeyEvent) {
@@ -291,6 +338,26 @@ impl App {
                 }
                 KeyCode::Enter => self.submit_sat_input(),
                 KeyCode::Esc => self.sat_input = None,
+                _ => {}
+            }
+            return;
+        }
+
+        // The go-to-time prompt swallows its keys too. After the satellite
+        // picker (which eats every printable char) and before the help overlay,
+        // so at most one modal is ever taking input.
+        if let Some(input) = self.time_input.as_mut() {
+            match key.code {
+                KeyCode::Char(c) if !c.is_control() && input.buffer.chars().count() < 32 => {
+                    input.buffer.push(c);
+                    input.error = None;
+                }
+                KeyCode::Backspace => {
+                    input.buffer.pop();
+                    input.error = None;
+                }
+                KeyCode::Enter => self.submit_time_input(),
+                KeyCode::Esc => self.time_input = None,
                 _ => {}
             }
             return;
@@ -347,6 +414,26 @@ impl App {
                 self.remove_tracked()
             }
             KeyCode::Char('r') => self.refresh_focused(),
+
+            // Time scrubbing. The displayed clock only; feed ages and the
+            // status chips stay on wall time. `<`/`>` and `h`/`l` are the
+            // shift-agnostic partners of `,`/`.` and the arrows, the same way
+            // `=`/`_` back up `+`/`-` above.
+            KeyCode::Char(' ') => self.clock.toggle_pause(),
+            KeyCode::Char('.') | KeyCode::Char('>') => self.clock.faster(),
+            KeyCode::Char(',') | KeyCode::Char('<') => self.clock.slower(),
+            KeyCode::Left | KeyCode::Char('h') => self.clock.jump(chrono::Duration::minutes(-1)),
+            KeyCode::Right | KeyCode::Char('l') => self.clock.jump(chrono::Duration::minutes(1)),
+            KeyCode::Char('[') => self.clock.jump(chrono::Duration::hours(-1)),
+            KeyCode::Char(']') => self.clock.jump(chrono::Duration::hours(1)),
+            KeyCode::Char('n') => self.jump_to_next_pass(false),
+            KeyCode::Char('N') => self.jump_to_next_pass(true),
+            KeyCode::Char('0') => {
+                self.clock.reset();
+                self.invalidate_passes();
+            }
+            KeyCode::Char('g') => self.time_input = Some(TimeInput::default()),
+
             _ => {}
         }
     }
@@ -411,10 +498,63 @@ impl App {
             }
             self.passes.clear();
             self.passes_at = None;
+            self.passes_from = None;
             let _ = self.sat_tx.send(norad_id);
         }
         // Persist the choice; ignore write errors (e.g. read-only home).
         let _ = self.config.save();
+    }
+
+    /// Resolve the go-to-time prompt: on a good parse, jump there and close;
+    /// on a bad one, keep the prompt open with the error under the field.
+    fn submit_time_input(&mut self) {
+        let Some(input) = self.time_input.as_ref() else { return };
+        match crate::simclock::parse_goto(&input.buffer, self.sim_now()) {
+            Ok(target) => {
+                self.clock.goto(target);
+                self.invalidate_passes();
+                self.time_input = None;
+            }
+            Err(e) => {
+                if let Some(input) = self.time_input.as_mut() {
+                    input.error = Some(format!("{e:#}"));
+                }
+            }
+        }
+    }
+
+    /// Jump the clock to 30 s before the next predicted pass rises, paused
+    /// there. `visible_only` restricts to naked-eye (`★`) passes. A no-op with
+    /// a note when there is no ground station or the window holds no such pass.
+    fn jump_to_next_pass(&mut self, visible_only: bool) {
+        // Land on AOS minus this, so the satellite is seen coming over the
+        // horizon rather than already up.
+        let lead = chrono::Duration::seconds(30);
+        let now = self.sim_now();
+        // `> now`, strictly: right after a jump `now == aos - lead` for the
+        // pass we just landed on, so a second press must skip it and advance
+        // to the following one rather than re-selecting the same pass.
+        let target = self
+            .passes
+            .iter()
+            .filter(|p| !visible_only || p.visible)
+            .map(|p| p.aos - lead)
+            .find(|&t| t > now);
+        match target {
+            Some(t) => {
+                self.clock.goto(t);
+                self.invalidate_passes();
+            }
+            None => {
+                if let Ok(mut d) = self.data.write() {
+                    d.note(if visible_only {
+                        "no visible pass ahead in the prediction window"
+                    } else {
+                        "no pass ahead in the prediction window"
+                    });
+                }
+            }
+        }
     }
 
     /// Clear a stale search result — the query no longer matches what's
@@ -640,9 +780,12 @@ pub async fn run(mut config: Config) -> Result<()> {
         help_scroll: 0,
         should_quit: false,
         started: Instant::now(),
+        clock: SimClock::new(),
         sat_input: None,
+        time_input: None,
         passes: Vec::new(),
         passes_at: None,
+        passes_from: None,
         sat_tx,
         search_tx,
         notifiers,
@@ -664,6 +807,9 @@ async fn render_loop(
     tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 
     loop {
+        // Fold elapsed wall time into the simulated clock before anything
+        // reads it this frame.
+        app.clock.advance();
         app.refresh_passes();
         app.sync_tracked_name();
         terminal
@@ -1071,9 +1217,12 @@ mod tests {
             help_scroll: 0,
             should_quit: false,
             started: Instant::now(),
+            clock: SimClock::new(),
             sat_input: None,
+            time_input: None,
             passes: Vec::new(),
             passes_at: None,
+            passes_from: None,
             sat_tx,
             search_tx,
             notifiers: Notifiers::new(),
@@ -1191,6 +1340,10 @@ mod tests {
         app.handle_key(KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE));
     }
 
+    fn press_code(app: &mut App, code: KeyCode) {
+        app.handle_key(KeyEvent::new(code, KeyModifiers::NONE));
+    }
+
     #[test]
     fn zooming_in_from_the_whole_world_returns_to_the_level_it_left() {
         let mut app = test_app(Config::default());
@@ -1240,5 +1393,164 @@ mod tests {
         assert_eq!((app.follow, app.zoom), (follow, zoom), "`p` is orthogonal to the map view");
         press(&mut app, 'p');
         assert!(!app.places);
+    }
+
+    // --- time scrubbing ---------------------------------------------------
+
+    use crate::simclock::ClockState;
+
+    fn dummy_pass(aos: DateTime<Utc>, visible: bool) -> Pass {
+        Pass {
+            aos,
+            los: aos + chrono::Duration::minutes(6),
+            peak: aos + chrono::Duration::minutes(3),
+            peak_elevation_deg: 30.0,
+            aos_azimuth_deg: 200.0,
+            los_azimuth_deg: 20.0,
+            visible,
+        }
+    }
+
+    /// A jump target compared against `sim_now`, allowing a couple of seconds
+    /// for the wall clock to tick between `goto` and the read.
+    fn about(a: DateTime<Utc>, b: DateTime<Utc>) -> bool {
+        (a - b).abs() < chrono::Duration::seconds(2)
+    }
+
+    #[test]
+    fn space_toggles_the_pause_state() {
+        let mut app = test_app(Config::default());
+        assert!(app.clock.is_live());
+        press(&mut app, ' ');
+        assert_eq!(app.clock.state(), ClockState::Paused);
+        press(&mut app, ' ');
+        assert!(app.clock.is_live());
+    }
+
+    #[test]
+    fn comma_and_period_walk_the_rate_through_one_times_into_reverse() {
+        let mut app = test_app(Config::default());
+        press(&mut app, '.');
+        press(&mut app, '.');
+        assert_eq!(app.clock.state(), ClockState::Warp(5));
+        press(&mut app, ',');
+        press(&mut app, ',');
+        assert!(app.clock.is_live(), "stepping back down lands exactly on live");
+        press(&mut app, ',');
+        assert_eq!(app.clock.state(), ClockState::Warp(-1), "one more crosses into reverse");
+    }
+
+    #[test]
+    fn arrows_and_brackets_step_the_clock_and_leave_the_rate_alone() {
+        let mut app = test_app(Config::default());
+        let before = app.sim_now();
+        press_code(&mut app, KeyCode::Right);
+        press_code(&mut app, KeyCode::Right);
+        press(&mut app, ']');
+        let moved = app.sim_now() - before;
+        let want = chrono::Duration::hours(1) + chrono::Duration::minutes(2);
+        assert!((moved - want).abs() < chrono::Duration::seconds(2), "stepped {moved}");
+        assert_eq!(app.clock.state(), ClockState::Drifted, "a step does not touch the rate");
+    }
+
+    #[test]
+    fn snapping_back_to_now_clears_both_the_offset_and_the_rate() {
+        let mut app = test_app(Config::default());
+        press(&mut app, '.');
+        press_code(&mut app, KeyCode::Right);
+        press(&mut app, ' ');
+        assert!(!app.clock.is_live());
+        app.passes_at = Some(Instant::now());
+        app.passes_from = Some(Utc::now());
+        press(&mut app, '0');
+        assert!(app.clock.is_live());
+        assert!(app.passes_at.is_none() && app.passes_from.is_none(), "the pass cache is dropped");
+    }
+
+    #[test]
+    fn scrub_keys_do_nothing_while_the_satellite_picker_is_open() {
+        let mut app = test_app(Config::default());
+        app.sat_input = Some(SatPicker::default());
+        press(&mut app, ' ');
+        press(&mut app, '.');
+        press_code(&mut app, KeyCode::Right);
+        assert!(app.clock.is_live(), "the picker swallows the keys");
+        assert_eq!(app.sat_input.as_ref().unwrap().query, " .", "they went to the query instead");
+    }
+
+    #[test]
+    fn g_opens_the_prompt_and_a_valid_time_jumps_the_clock() {
+        let mut app = test_app(Config::default());
+        press(&mut app, 'g');
+        assert!(app.time_input.is_some());
+        for c in "+3d".chars() {
+            press(&mut app, c);
+        }
+        press_code(&mut app, KeyCode::Enter);
+        assert!(app.time_input.is_none(), "a good parse closes the prompt");
+        assert!(about(app.sim_now(), Utc::now() + chrono::Duration::days(3)));
+    }
+
+    #[test]
+    fn the_prompt_keeps_a_bad_time_on_screen_with_an_error() {
+        let mut app = test_app(Config::default());
+        press(&mut app, 'g');
+        for c in "banana".chars() {
+            press(&mut app, c);
+        }
+        press_code(&mut app, KeyCode::Enter);
+        let input = app.time_input.as_ref().expect("the prompt stays open on a bad parse");
+        assert!(input.error.is_some());
+        assert!(app.clock.is_live(), "and the clock has not moved");
+    }
+
+    #[test]
+    fn pressing_n_twice_advances_past_the_pass_it_just_jumped_to() {
+        let mut app = test_app(Config::default());
+        let first = Utc::now() + chrono::Duration::hours(2);
+        let second = first + chrono::Duration::hours(2);
+        app.passes = vec![dummy_pass(first, false), dummy_pass(second, false)];
+        let lead = chrono::Duration::seconds(30);
+
+        press(&mut app, 'n');
+        assert!(about(app.sim_now(), first - lead));
+
+        press(&mut app, 'n');
+        assert!(about(app.sim_now(), second - lead), "a second press skips the pass just landed on");
+    }
+
+    #[test]
+    fn capital_n_jumps_only_to_naked_eye_visible_passes() {
+        let mut app = test_app(Config::default());
+        let dim = Utc::now() + chrono::Duration::hours(1);
+        let bright = dim + chrono::Duration::hours(3);
+        app.passes = vec![dummy_pass(dim, false), dummy_pass(bright, true)];
+        press(&mut app, 'N');
+        assert!(about(app.sim_now(), bright - chrono::Duration::seconds(30)));
+    }
+
+    #[test]
+    fn a_next_pass_jump_with_no_passes_is_a_harmless_no_op() {
+        let mut app = test_app(Config::default());
+        press(&mut app, 'n');
+        assert!(app.clock.is_live());
+    }
+
+    #[test]
+    fn refresh_passes_recomputes_after_a_time_jump() {
+        let mut config = Config::default();
+        config.set_location(48.0, 11.0, None);
+        let mut app = test_app(config);
+        if let Ok(mut d) = app.data.write() {
+            d.tle.set_live(crate::orbit::test_tracker());
+        }
+        app.refresh_passes();
+        let first = app.passes_from.expect("the window is built once");
+
+        app.clock.jump(chrono::Duration::hours(12));
+        app.refresh_passes();
+        let second = app.passes_from.expect("and rebuilt after the jump");
+
+        assert!(second - first > chrono::Duration::hours(11), "the window moved with the clock");
     }
 }
