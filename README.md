@@ -160,7 +160,8 @@ What stays on the real clock: the feed-status chips and
 their ages, session uptime, and the launch countdown — those track real events,
 not the view. The title-bar clock turns amber with a marker (`▸` drifted, `‖`
 paused, `▸▸60x` / `◂◂5x` warp) whenever it is not live, so the display can never
-quietly claim to be current when it isn't.
+quietly claim to be current when it isn't — and, when the bar is wide enough,
+the offset from now beside it (`Δ+2h14m`, `Δ-45m`, `Δ+3d`).
 
 While the `?` overlay is open, `j`/`k`/`PgUp`/`PgDn`/`Home`/`End` scroll it
 instead, and `?` or `Esc` closes it.

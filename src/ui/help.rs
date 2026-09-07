@@ -102,6 +102,8 @@ fn content(app: &App) -> Vec<Line<'static>> {
     text(&mut l, "uptime (\"up\") and the clock on the right.");
     text(&mut l, "The clock shows the simulated instant, green when it is live and amber");
     text(&mut l, "with a marker when scrubbed: ▸ drifted, ‖ paused, ▸▸60x / ◂◂5x warp.");
+    text(&mut l, "While scrubbed it also shows the offset from now (Δ+2h14m, Δ-45m,");
+    text(&mut l, "Δ+3d) beside the marker, when the bar is wide enough.");
     blank(&mut l);
 
     heading(&mut l, "Map");
