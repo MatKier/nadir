@@ -403,6 +403,23 @@ impl Tracker {
     /// ([`split_at_antimeridian`]) so the map never draws a spurious streak
     /// across the world. A step whose propagation fails is skipped, leaving a
     /// time gap but never a false longitude jump.
+    ///
+    /// One case the split intentionally does *not* catch: a near-90°
+    /// inclination track passing over a pole swings almost 180° of longitude in
+    /// a single step (`cos i ≈ 0`, so the sub-point's longitude flips as it
+    /// changes hemisphere). At exactly 90° that swing is ~179.9° — just under
+    /// the split threshold — and whether any given step tips over 180° depends
+    /// on where the sample grid lands relative to the pole, so the same orbit
+    /// can show either a joined chord or a one-step gap at the pole from frame
+    /// to frame. The chord is left in: unlike a dateline streak, it only spans
+    /// the ~1° of latitude on either side of the pole that the satellite really
+    /// does cross (SGP4 puts the worst step at lat 89.6°), so at whole-world
+    /// zoom it lands within half a Braille sub-pixel of the true path, whereas
+    /// splitting would open a real gap. See
+    /// `ground_track_leaves_a_polar_crossing_unsplit_at_ninety_degrees_inclination`.
+    ///
+    /// A step whose propagation fails is skipped, leaving a time gap but never a
+    /// false longitude jump.
     pub fn ground_track(
         &self,
         now: DateTime<Utc>,
@@ -635,6 +652,48 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn ground_track_leaves_a_polar_crossing_unsplit_at_ninety_degrees_inclination() {
+        // A ~90° track crossing the pole flips almost exactly 180° in longitude
+        // in one 20 s step, so `split_at_antimeridian`'s `> 180.0` test *just*
+        // fails to fire and the pair is left inside one segment. Whether it
+        // fires at all is phase-dependent, so sweep the start instant and take
+        // the run whose pole-straddling step comes closest to — but under — the
+        // threshold. The point of the test: the un-split chord is a faithful
+        // draw, not a bug — it spans only the ~1° of latitude either side of
+        // the pole that the satellite genuinely traverses, unlike a dateline
+        // streak that would sweep longitudes it never visits.
+        let tr = crate::orbit::test_polar_tracker();
+        let mut worst: Option<(f64, f64)> = None; // (|Δlon|, |lat| at that step)
+        for off_s in 0..600 {
+            let start = tr.epoch() + chrono::Duration::seconds(off_s);
+            let segs = tr.ground_track(
+                start,
+                chrono::Duration::zero(),
+                chrono::Duration::minutes(65),
+                chrono::Duration::seconds(20),
+            );
+            for seg in &segs {
+                for w in seg.windows(2) {
+                    let dlon = (w[0].lon_deg - w[1].lon_deg).abs();
+                    // Inside a segment the splitter guarantees this.
+                    assert!(dlon < 180.0, "splitter left a >180° jump inside a segment");
+                    let lat = w[0].lat_deg.abs().max(w[1].lat_deg.abs());
+                    if lat > 88.0 && worst.is_none_or(|(d, _)| dlon > d) {
+                        worst = Some((dlon, lat));
+                    }
+                }
+            }
+        }
+
+        let (dlon, lat) = worst.expect("a near-polar orbit must produce a pole-straddling step");
+        // The chord really does span most of the map in longitude …
+        assert!(dlon > 150.0, "expected a near-180° unsplit jump, got {dlon:.1}°");
+        // … while covering barely a degree of latitude, which is why leaving it
+        // un-split is correct: the true path is within ~1° of the pole here.
+        assert!(lat > 89.0, "pole-straddling step sits at lat {lat:.2}°, not near the pole");
     }
 
     #[test]

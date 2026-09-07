@@ -219,6 +219,11 @@ pub fn destination_point(from: &GeoPoint, bearing_rad: f64, angular_dist_rad: f6
 /// would otherwise be drawn as a spurious streak straight across the map.
 /// Segments left with fewer than two points (nothing to draw a line through)
 /// are dropped, so the result can be empty.
+///
+/// This is a *dateline* test, not a pole test. A step straddling a pole on a
+/// near-90° orbit also flips close to 180° of longitude, but just under it, so
+/// it stays inside one segment — deliberately; see [`crate::orbit::Tracker::ground_track`]
+/// for why splitting there would be wrong.
 pub fn split_at_antimeridian(points: Vec<GeoPoint>) -> Vec<Vec<GeoPoint>> {
     let mut segments: Vec<Vec<GeoPoint>> = vec![Vec::new()];
     let mut prev_lon: Option<f64> = None;
