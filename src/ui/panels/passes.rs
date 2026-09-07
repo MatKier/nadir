@@ -2,17 +2,24 @@
 //! ground station.
 
 use chrono::{DateTime, Duration, FixedOffset, Local, Utc};
-use ratatui::layout::Rect;
-use ratatui::style::{Modifier, Style};
+use ratatui::layout::{Constraint, Layout, Rect};
+use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{List, ListItem, ListState, Paragraph, Wrap};
 use ratatui::Frame;
 
 use crate::app::{App, Panel};
+use crate::orbit::{Confidence, Pass, SatState, Tracker};
 use crate::ui::panels::fmt::{dim, row_highlight, station_label};
 use crate::ui::{is_focused, panel_block, Theme};
 
-pub fn draw(frame: &mut Frame, area: Rect, app: &App, now: DateTime<Utc>) {
+pub fn draw(
+    frame: &mut Frame,
+    area: Rect,
+    app: &App,
+    sat: Option<&(Tracker, SatState)>,
+    now: DateTime<Utc>,
+) {
     let focused = is_focused(app, Panel::Passes);
 
     if app.config.ground_station().is_none() {
@@ -78,12 +85,62 @@ pub fn draw(frame: &mut Frame, area: Rect, app: &App, now: DateTime<Utc>) {
         })
         .collect();
 
+    // Reserve the bottom inner row for an accuracy footer, but only when the
+    // pass times on screen carry a timing error worth stating — a fresh
+    // element set is good to a fraction of a second and gets no footer at all.
+    // Because a footer needs the block's *inner* area, the block is drawn on
+    // its own here rather than handed to the `List`.
+    let footer = pass_accuracy_footer(sat, &app.passes);
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+    let (list_area, footer_area) = match footer {
+        Some(_) => {
+            let [l, f] =
+                Layout::vertical([Constraint::Min(1), Constraint::Length(1)]).areas(inner);
+            (l, Some(f))
+        }
+        None => (inner, None),
+    };
+
     let selected = focused.then(|| app.list_pos.min(app.passes.len().saturating_sub(1)));
     let list = List::new(items)
-        .block(block)
         .highlight_style(row_highlight())
         .highlight_symbol("▶ ");
-    frame.render_stateful_widget(list, area, &mut ListState::default().with_selected(selected));
+    frame.render_stateful_widget(
+        list,
+        list_area,
+        &mut ListState::default().with_selected(selected),
+    );
+
+    if let (Some((text, color)), Some(fa)) = (footer, footer_area) {
+        frame.render_widget(Paragraph::new(Span::styled(text, Style::new().fg(color))), fa);
+    }
+}
+
+/// A one-line accuracy note for the pass list, or `None` when the modelled
+/// timing error is under a second — not worth a row. The figure is the
+/// along-track timing error at the *last* pass on screen, so the single number
+/// is an upper bound over every row above it rather than right for the first
+/// and stale by the last. Same model as the TELEMETRY panel's `ACC` row.
+fn pass_accuracy_footer(
+    sat: Option<&(Tracker, SatState)>,
+    passes: &[Pass],
+) -> Option<(String, Color)> {
+    let (tr, state) = sat?;
+    let last = passes.last()?;
+    let acc = tr.accuracy_at(last.aos, state.speed_kms);
+
+    let color = match acc.confidence {
+        Confidence::Nominal => Theme::LABEL,
+        Confidence::Degraded => Theme::CAUTION,
+        Confidence::Unreliable | Confidence::Unmodelled => Theme::ALERT,
+    };
+    let text = match acc.confidence {
+        Confidence::Unmodelled => "  pass times beyond the model".to_string(),
+        _ if acc.timing_s < 1.0 => return None,
+        _ => format!("  AOS/LOS good to ±{:.0} s", acc.timing_s),
+    };
+    Some((text, color))
 }
 
 /// The NEXT PASSES panel title: the base title, plus the ground station's

@@ -4,6 +4,7 @@ use anyhow::{anyhow, Context, Result};
 use chrono::{DateTime, Utc};
 
 use crate::geo::{dot, ecef_to_geodetic, norm, split_at_antimeridian, teme_to_ecef, GeoPoint};
+use crate::orbit::accuracy::{self, Accuracy};
 use crate::orbit::solar::{subsolar_point, sun_ecef_unit};
 
 /// Everything nadir needs about the satellite at one instant.
@@ -263,6 +264,18 @@ fn orbit_shape(elements: &sgp4::Elements) -> std::result::Result<OrbitShape, sgp
     })
 }
 
+/// `sgp4::Constants` from `elements` with B\* scaled by
+/// `1 + accuracy::BSTAR_REL_UNCERTAINTY`. `None` when that perturbed element
+/// set won't initialise — see [`Tracker::drag_constants`]. Scaling a zero B\*
+/// leaves it zero, which is fine: the difference against the nominal
+/// propagation is then flat zero and `orbit::accuracy` falls through to its
+/// regime floor.
+fn perturbed_drag_constants(elements: &sgp4::Elements) -> Option<sgp4::Constants> {
+    let mut perturbed = elements.clone();
+    perturbed.drag_term *= 1.0 + accuracy::BSTAR_REL_UNCERTAINTY;
+    sgp4::Constants::from_elements(&perturbed).ok()
+}
+
 /// A ready-to-use propagator for one satellite, built from a TLE / GP element set.
 #[derive(Clone)]
 pub struct Tracker {
@@ -270,6 +283,13 @@ pub struct Tracker {
     norad_id: u64,
     elements: sgp4::Elements,
     constants: sgp4::Constants,
+    /// A second propagator from the same elements with B\* scaled by
+    /// `1 + accuracy::BSTAR_REL_UNCERTAINTY`, used only by
+    /// [`Tracker::accuracy_at`] to measure how sensitive this orbit is to its
+    /// fitted drag term. `None` when that perturbed element set won't
+    /// initialise — the accuracy model then leans on its regime floor alone
+    /// rather than the whole `Tracker` failing over an estimate.
+    drag_constants: Option<sgp4::Constants>,
     shape: OrbitShape,
 }
 
@@ -290,6 +310,11 @@ impl Tracker {
             .map_err(|e| anyhow!("SGP4 rejected these elements: {e}"))?;
         let shape = orbit_shape(&elements)
             .map_err(|e| anyhow!("deriving orbit shape from these elements: {e}"))?;
+        // Built once, here, so the accuracy estimate costs one extra
+        // `propagate` per frame rather than a fresh SGP4 init. A near-zero B\*
+        // nudged the wrong way, or any other reason the perturbed set is
+        // rejected, just means no drag-sensitivity term — not a dead `Tracker`.
+        let drag_constants = perturbed_drag_constants(&elements);
         Ok(Self {
             name: elements
                 .object_name
@@ -298,6 +323,7 @@ impl Tracker {
             norad_id: elements.norad_id,
             elements,
             constants,
+            drag_constants,
             shape,
         })
     }
@@ -344,9 +370,47 @@ impl Tracker {
         self.elements.datetime.and_utc()
     }
 
-    /// Age of the element set relative to `now`.
+    /// Age of the element set relative to `now`. Signed: negative when `now` is
+    /// before the epoch, which a backward time scrub can produce.
     pub fn element_age(&self, now: DateTime<Utc>) -> chrono::Duration {
         now - self.epoch()
+    }
+
+    /// A modelled position-accuracy estimate for `time` — see
+    /// [`crate::orbit::accuracy`]. `speed_kms` is the value from the `SatState`
+    /// the caller has already propagated; it only scales the along-track error
+    /// into a timing error, so pass `0.0` when there is no state.
+    ///
+    /// Never fails. If the B\*-perturbed propagation can't be run — no
+    /// perturbed propagator was built, or it diverges at this `time` — the
+    /// estimate falls back to the regime floor rather than propagating the
+    /// error up. An accuracy figure is not worth losing a frame over.
+    pub fn accuracy_at(&self, time: DateTime<Utc>, speed_kms: f64) -> Accuracy {
+        Accuracy::model(
+            self.shape.class,
+            time - self.epoch(),
+            self.drag_divergence_km(time),
+            speed_kms,
+        )
+    }
+
+    /// Distance in km between the nominal position at `time` and the position
+    /// SGP4 gives when B\* is perturbed by
+    /// [`accuracy::BSTAR_REL_UNCERTAINTY`]. `None` when no perturbed
+    /// propagator exists or either propagation fails at `time`.
+    fn drag_divergence_km(&self, time: DateTime<Utc>) -> Option<f64> {
+        let drag = self.drag_constants.as_ref()?;
+        let minutes = self
+            .elements
+            .datetime_to_minutes_since_epoch(&time.naive_utc())
+            .ok()?;
+        let nominal = self.constants.propagate(minutes).ok()?;
+        let perturbed = drag.propagate(minutes).ok()?;
+        Some(norm([
+            nominal.position[0] - perturbed.position[0],
+            nominal.position[1] - perturbed.position[1],
+            nominal.position[2] - perturbed.position[2],
+        ]))
     }
 
     /// The orbit's time-invariant shape (period, inclination, apogee/perigee)
