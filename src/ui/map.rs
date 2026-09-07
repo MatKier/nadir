@@ -444,6 +444,11 @@ fn night_wash(grid: &Grid, now: DateTime<Utc>) -> (Vec<(f64, f64)>, Vec<(f64, f6
     let mut night = Vec::new();
     let mut twilight = Vec::new();
     for row in 0..grid.rows() {
+        // Clamp guards the globe only — `elevation_deg` needs a real latitude
+        // — not the canvas bounds. `view_bounds` never returns a window that
+        // runs past a pole, and `Grid::y_of`/`x_of` now hit their endpoints
+        // exactly, so every sample is already inside the pane ratatui will
+        // test it against.
         let lat = grid.y_of(row).clamp(-90.0, 90.0);
         for col in 0..grid.cols() {
             let lon = grid.x_of(col);
@@ -514,13 +519,28 @@ impl Grid {
 
     /// The x-coordinate at the left edge of cell column `col` — the inverse
     /// of [`Grid::col_of`].
+    ///
+    /// Written as a two-weight interpolation between the bounds rather than
+    /// `x[0] + col * span / (cols - 1)` so that the last column lands on
+    /// `x[1]` *bit-for-bit* (and column 0 on `x[0]`): with `t == 1.0` the
+    /// first term is a clean `0.0 * x[0]` and the second an exact `1.0 *
+    /// x[1]`. The stepped form reassociates as `x[0] + (cols - 1) *
+    /// (span / (cols - 1))`, which lands a few ULPs either side of `x[1]`.
+    /// That matters because [`night_wash`] feeds these coordinates straight
+    /// to ratatui's `Painter::get_point`, which *rejects* rather than clamps
+    /// a point outside the canvas bounds — so an edge sample a single ULP
+    /// over drops the whole rightmost column of the night wash for that
+    /// frame, and in follow mode the bounds shift every frame, so the
+    /// dropped column flickers in and out. Same reasoning drives [`y_of`].
+    ///
+    /// [`y_of`]: Grid::y_of
     fn x_of(&self, col: u16) -> f64 {
         let cols = self.cols();
         if cols < 2 {
             return self.x[0];
         }
-        let span = (self.x[1] - self.x[0]).abs();
-        self.x[0] + col as f64 * span / (cols - 1) as f64
+        let t = col as f64 / (cols - 1) as f64;
+        self.x[0] * (1.0 - t) + self.x[1] * t
     }
 
     /// Degrees of latitude spanned by one cell row.
@@ -532,11 +552,18 @@ impl Grid {
     /// [`Grid::col_of`] along the other axis. Row 0 is the top of the canvas
     /// (`y[1]`), matching ratatui's own `Painter::get_point`, which maps `y`
     /// as `(top - y) * (rows - 1) / height`.
+    ///
+    /// Interpolated between the bounds for the exact-endpoints reason spelled
+    /// out on [`x_of`](Grid::x_of): the last row must land on `y[0]`
+    /// bit-for-bit or its wash samples fall through `Painter::get_point` and
+    /// the bottom row of the night shading vanishes for the frame.
     fn y_of(&self, row: u16) -> f64 {
-        if self.rows() < 2 {
+        let rows = self.rows();
+        if rows < 2 {
             return self.y[1];
         }
-        self.y[1] - row as f64 * self.deg_per_row()
+        let t = row as f64 / (rows - 1) as f64;
+        self.y[1] * (1.0 - t) + self.y[0] * t
     }
 
     /// The cell row a y-coordinate lands on — [`Grid::col_of`]'s twin on the
@@ -831,6 +858,86 @@ mod tests {
         // or "none" the way a broken sign or a stuck constant would produce.
         let dark_fraction = (night.len() + twilight.len()) as f64 / total as f64;
         assert!((0.3..0.7).contains(&dark_fraction), "dark fraction {dark_fraction}");
+    }
+
+    /// Follow-window bounds that have bitten the wash, each reconstructed from
+    /// a flickering frame. The first has a longitude span whose far edge the
+    /// old stepped `x_of` overshot (a ×2 window centred at −83.39°); the
+    /// second a latitude span whose bottom row the old `y_of` undershot (a ×2
+    /// window whose centre latitude carried full mantissa entropy). The third
+    /// is the plain whole-world grid — a regression guard on the common path,
+    /// where the bounds are round and nothing missed even before the fix.
+    fn edge_case_grids() -> [Grid; 3] {
+        [
+            Grid {
+                inner: Rect::new(0, 0, 120, 90),
+                x: [-173.38698115457174, 6.613018845428243],
+                y: [-90.0, 90.0],
+            },
+            Grid {
+                inner: Rect::new(0, 0, 150, 20),
+                x: [-92.51915, 87.48085],
+                y: [-16.265400000435616, 73.73459999956438],
+            },
+            Grid { inner: Rect::new(0, 0, 200, 90), x: [-180.0, 180.0], y: [-90.0, 90.0] },
+        ]
+    }
+
+    #[test]
+    fn x_of_and_y_of_hit_their_far_bounds_exactly() {
+        // Bit-for-bit, not `< epsilon`: `Painter::get_point` *rejects* rather
+        // than clamps a coordinate even one ULP past the bound, and
+        // `Points::draw` then silently skips it — so a stepped edge sample
+        // drops the whole outer row or column of the night wash for that
+        // frame, and in follow mode the bounds move every frame so it
+        // flickers. The interpolated forms land on the endpoints exactly.
+        for g in edge_case_grids() {
+            assert_eq!(g.x_of(0), g.x[0], "x_of(0), inner {:?}", g.inner);
+            assert_eq!(g.x_of(g.cols() - 1), g.x[1], "x_of(last), inner {:?}", g.inner);
+            assert_eq!(g.y_of(0), g.y[1], "y_of(0), inner {:?}", g.inner);
+            assert_eq!(g.y_of(g.rows() - 1), g.y[0], "y_of(last), inner {:?}", g.inner);
+        }
+    }
+
+    #[test]
+    fn night_wash_keeps_every_sample_inside_the_canvas_bounds() {
+        use chrono::TimeZone;
+        // The invariant the flicker violates: every cell the wash emits must
+        // pass the same test `Painter::get_point` applies before drawing it,
+        // `x[0] <= lon <= x[1] && y[0] <= lat <= y[1]`. A sample outside it is
+        // dropped by ratatui, unshaded, and the bug is back.
+        let t = Utc.with_ymd_and_hms(2026, 9, 4, 6, 0, 0).unwrap();
+        for g in edge_case_grids() {
+            let (night, twilight) = night_wash(&g, t);
+            for (lon, lat) in night.iter().chain(&twilight) {
+                assert!(
+                    *lon >= g.x[0] && *lon <= g.x[1] && *lat >= g.y[0] && *lat <= g.y[1],
+                    "sample ({lon}, {lat}) outside bounds x {:?} y {:?}",
+                    g.x,
+                    g.y
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn night_wash_shades_every_cell_of_a_fully_dark_follow_window() {
+        use chrono::TimeZone;
+        // A ×8 follow window parked over the antisolar point (~7°S 90°W at
+        // this instant) is night in every corner, so the wash must emit one
+        // night sample per cell and no gaps — the behavioural form of the bug
+        // report, where the bottom row of exactly such a window went unshaded.
+        let g = Grid {
+            inner: Rect::new(0, 0, 80, 30),
+            x: [-123.75, -78.75],
+            y: [-41.25, -18.75],
+        };
+        let t = Utc.with_ymd_and_hms(2026, 9, 4, 6, 0, 0).unwrap();
+        let (night, twilight) = night_wash(&g, t);
+
+        let cells = usize::from(g.cols()) * usize::from(g.rows());
+        assert_eq!(night.len(), cells, "every cell should be full night");
+        assert!(twilight.is_empty(), "window is well past civil twilight");
     }
 
     #[test]
