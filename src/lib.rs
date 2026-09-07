@@ -9,5 +9,6 @@ pub mod cache;
 pub mod config;
 pub mod geo;
 pub mod orbit;
+pub mod simclock;
 pub mod source;
 pub mod ui;

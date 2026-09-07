@@ -40,12 +40,20 @@ pub fn draw(
     area: Rect,
     app: &App,
     sat: Option<&(Tracker, SatState)>,
+    has_elements: bool,
     now: DateTime<Utc>,
 ) {
     let block = panel_block(Panel::Telemetry, "TELEMETRY", is_focused(app, Panel::Telemetry));
     let mut rows: Vec<Line> = Vec::new();
 
     match sat {
+        // `sat` is `None` either because no element set has arrived yet, or
+        // because one has but the clock has been scrubbed past where SGP4 will
+        // propagate it — different situations that must not read the same.
+        None if has_elements => {
+            rows.push(dim("  can't propagate the element set to this time"));
+            rows.push(dim("  press 0 to snap back to now"));
+        }
         None => rows.push(dim("  waiting for the element set…")),
         Some((tr, s)) => {
             rows.push(kv("ALT", format!("{:>VALUE_W$.1} km", s.sub_point.alt_km)));
