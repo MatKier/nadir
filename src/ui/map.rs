@@ -167,25 +167,41 @@ fn paint_scene(
     ctx.draw(&Points { coords: twilight, color: Theme::TWILIGHT });
     ctx.draw(&Points { coords: night, color: Theme::NIGHT });
 
+    // Each Braille feature gets its own `ctx.layer()`. A Braille cell is 2x4
+    // dots but carries one fg colour (ratatui's `PatternGrid` ORs dot bits and
+    // overwrites the colour), so two features sharing a cell in a single layer
+    // fuse into one glyph in the last colour drawn — a coastline dot plus a
+    // footprint dot read as one fat blob. Across layers the later feature's
+    // non-blank cell *replaces* the earlier one instead, so every line keeps
+    // its own colour and stays one dot thick. Don't merge these back for the
+    // per-layer allocation: the split is what fixes the thickening.
     ctx.marker(Marker::Braille);
     ctx.draw(&Map { resolution: MapResolution::High, color: Theme::COAST });
+    ctx.layer();
 
     ctx.draw(&Points { coords: &scene.terminator, color: Theme::CAUTION });
+    ctx.layer();
 
-    // Footprint before the tracks, same layer: a GEO ring crosses the ground
-    // track several times, and the last write to a cell wins, so drawing it
-    // first lets the track stay continuous through every crossing rather than
-    // being punched through by the ring.
+    // Footprint before the tracks: a GEO ring crosses the ground track several
+    // times, and the last layer to claim a cell wins, so drawing it in an
+    // earlier layer lets the track stay continuous through every crossing.
+    // Where they meet the ring simply yields the cell — one missing dot in a
+    // dotted ring, invisible — rather than being recoloured by the track.
+    // `ctx.layer()` pushes unconditionally, so only call it where a feature
+    // actually drew; an empty layer renders as a no-op but still allocates a
+    // full-grid buffer.
     if let Some(segments) = &scene.footprint {
         draw_polyline(ctx, segments, Theme::FOOTPRINT);
+        ctx.layer();
     }
     if let Some(segments) = &scene.track_past {
         draw_polyline(ctx, segments, Theme::TRACK_PAST);
+        ctx.layer();
     }
     if let Some(segments) = &scene.track_future {
         draw_polyline(ctx, segments, Theme::TRACK_FUTURE);
+        ctx.layer();
     }
-    ctx.layer();
 
     // The place layer sits under the three live markers — it's reference
     // scenery, not data — but is laid out *against* them (they're seeded
@@ -1294,5 +1310,83 @@ mod tests {
         }
         let unique: std::collections::HashSet<_> = labelled.iter().collect();
         assert_eq!(unique.len(), labelled.len(), "a place was labelled twice across the seam");
+    }
+
+    #[test]
+    fn a_footprint_cell_never_fuses_with_the_coastline_it_crosses() {
+        // The "thick line" bug: a Braille cell holds 2x4 dots but one fg
+        // colour, so coastline and footprint dots in the same cell used to OR
+        // into a single fat glyph painted footprint-violet. Each Braille
+        // feature now owns a canvas layer, so a shared cell is won outright by
+        // one of them and a footprint cell keeps just the two dots a
+        // dead-horizontal run leaves behind.
+        use ratatui::buffer::{Buffer, Cell};
+        use ratatui::widgets::Widget;
+
+        let x = [-180.0_f64, 180.0];
+        let y = [-90.0_f64, 90.0];
+        let rect = Rect::new(0, 0, 240, 60);
+        let grid = Grid { inner: rect, x, y };
+
+        // A dead-horizontal footprint segment at 50°N sweeping 0°E..120°E,
+        // straight across Eurasia — guaranteed to share cells with coastline
+        // dots along the way. Horizontal means the Bresenham run takes the
+        // `dy == 0` branch and drops exactly two dots per interior cell.
+        let ring = vec![vec![GeoPoint::new(50.0, 0.0, 0.0), GeoPoint::new(50.0, 120.0, 0.0)]];
+
+        let render = |footprint: Option<Vec<Vec<GeoPoint>>>| {
+            let scene = Scene {
+                sat: None,
+                pad: None,
+                station: None,
+                track_past: None,
+                track_future: None,
+                footprint,
+                terminator: Vec::new(),
+                places: false,
+            };
+            let mut buf = Buffer::empty(rect);
+            Canvas::default()
+                .marker(Marker::Braille)
+                .x_bounds(x)
+                .y_bounds(y)
+                .paint(|ctx| paint_scene(ctx, &grid, &scene, &[], &[]))
+                .render(rect, &mut buf);
+            buf
+        };
+
+        let dots = |cell: &Cell| -> u32 {
+            let Some(c) = cell.symbol().chars().next() else { return 0 };
+            if ('\u{2800}'..='\u{28FF}').contains(&c) {
+                (c as u32 - 0x2800).count_ones()
+            } else {
+                0
+            }
+        };
+
+        let coast_only = render(None);
+        let coast_cells: std::collections::HashSet<usize> = coast_only
+            .content
+            .iter()
+            .enumerate()
+            .filter(|(_, c)| dots(c) > 0)
+            .map(|(i, _)| i)
+            .collect();
+
+        let with_ring = render(Some(ring));
+        let mut crossings = 0usize;
+        for (i, cell) in with_ring.content.iter().enumerate() {
+            if cell.fg == Theme::FOOTPRINT {
+                assert!(
+                    dots(cell) <= 2,
+                    "footprint cell {i} carries {} dots — fused with another feature",
+                    dots(cell)
+                );
+                if coast_cells.contains(&i) {
+                    crossings += 1;
+                }
+            }
+        }
+        assert!(crossings > 0, "the ring never shared a cell with the coastline — test is vacuous");
     }
 }
