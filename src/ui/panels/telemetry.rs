@@ -8,9 +8,9 @@ use ratatui::widgets::Paragraph;
 use ratatui::Frame;
 
 use crate::app::{App, Panel};
-use crate::geo::look_angles;
+use crate::geo::{look_angles, LookAngles};
 use crate::orbit::{Confidence, SatState, Tracker};
-use crate::ui::panels::fmt::{dim, kv, label};
+use crate::ui::panels::fmt::{dim, footer, kv, label};
 use crate::ui::{is_focused, panel_block, Theme};
 
 /// Width of the value column every telemetry row right-aligns into, so the
@@ -43,8 +43,16 @@ pub fn draw(
     has_elements: bool,
     now: DateTime<Utc>,
 ) {
-    let block = panel_block(Panel::Telemetry, "TELEMETRY", is_focused(app, Panel::Telemetry));
+    let mut block = panel_block(Panel::Telemetry, "TELEMETRY", is_focused(app, Panel::Telemetry));
+    // Computed once here rather than assumed to be 38: the RANGE row and the
+    // epoch footer both size themselves against the real inner width, so a
+    // narrower panel degrades its text instead of clipping into the border.
+    let inner_w = block.inner(area).width as usize;
     let mut rows: Vec<Line> = Vec::new();
+    // The element-set epoch, rendered on the bottom border after the match —
+    // the "can't propagate" arm below has no `Tracker` to read it from, so it
+    // is carried out here rather than pushed as a row.
+    let mut epoch: Option<DateTime<Utc>> = None;
 
     match sat {
         // `sat` is `None` either because no element set has arrived yet, or
@@ -56,6 +64,7 @@ pub fn draw(
         }
         None => rows.push(dim("  waiting for the element set…")),
         Some((tr, s)) => {
+            epoch = Some(tr.epoch());
             rows.push(kv("ALT", format!("{:>VALUE_W$.1} km", s.sub_point.alt_km)));
             rows.push(kv(
                 "SPD",
@@ -111,17 +120,7 @@ pub fn draw(
 
             // Live look angle from the ground station, when one is configured.
             if let Some(g) = app.config.ground_station() {
-                let la = look_angles(&g, s.ecef_km);
-                let (word, wc) = if la.elevation_deg >= 0.0 {
-                    (format!("el {:+.0}°  in view", la.elevation_deg), Theme::NOMINAL)
-                } else {
-                    (format!("el {:+.0}°  below horizon", la.elevation_deg), Theme::LABEL)
-                };
-                rows.push(Line::from(vec![
-                    label("RANGE"),
-                    Span::styled(format!("{:>VALUE_W$.0} km  ", la.range_km), Style::new().fg(Theme::VALUE)),
-                    Span::styled(word, Style::new().fg(wc)),
-                ]));
+                rows.push(range_row(&look_angles(&g, s.ecef_km), inner_w));
             }
 
             // `element_age` is signed — a backward scrub puts `now` before the
@@ -183,7 +182,58 @@ pub fn draw(
         }
     }
 
+    // The exact epoch on the bottom border — the `title_bottom` provenance
+    // pattern SPACE WEATHER and LAUNCHES use, so it costs no body row (this
+    // panel already gives one up at the 80x24 minimum). Only when the border
+    // is wide enough to hold it in full: fixing one clipped string by adding
+    // another would be no fix at all. `footer`'s own `+ 2` is its ` … `
+    // padding.
+    if let Some(e) = epoch {
+        let bit = format!("epoch {}", e.format("%Y-%m-%d %H:%M:%SZ"));
+        if bit.chars().count() + 2 <= inner_w {
+            block = footer(block, vec![bit]);
+        }
+    }
+
     frame.render_widget(Paragraph::new(rows).block(block), area);
+}
+
+/// The RANGE row, sized to `budget` columns (the panel's inner width) so its
+/// trailing phrase degrades instead of clipping into the right border — the
+/// below-horizon wording overran a fixed 38-column panel at every elevation.
+/// The head (label plus slant range) is fixed; the tail takes the first form
+/// that fits from a shortest-fit ladder — the two-space set-off, a single
+/// space, a short state word, then the elevation alone. The measured number
+/// is the last thing to go.
+fn range_row(la: &LookAngles, budget: usize) -> Line<'static> {
+    let in_view = la.elevation_deg >= 0.0;
+    let color = if in_view { Theme::NOMINAL } else { Theme::LABEL };
+    let (state_full, state_short) =
+        if in_view { ("in view", "in view") } else { ("below horizon", "below") };
+    let elev = format!("el {:+.0}°", la.elevation_deg);
+
+    let head = vec![
+        label("RANGE"),
+        Span::styled(format!("{:>VALUE_W$.0} km", la.range_km), Style::new().fg(Theme::VALUE)),
+    ];
+    // Every glyph in the tail is one column wide (ASCII plus `°`), so a `char`
+    // count is the display width `Line::width` will measure.
+    let room = budget.saturating_sub(head.iter().map(Span::width).sum::<usize>());
+    let tail = [
+        format!("  {elev}  {state_full}"),
+        format!("  {elev} {state_full}"),
+        format!("  {elev} {state_short}"),
+        format!("  {elev}"),
+    ]
+    .into_iter()
+    .find(|s| s.chars().count() <= room)
+    .unwrap_or_default();
+
+    let mut spans = head;
+    if !tail.is_empty() {
+        spans.push(Span::styled(tail, Style::new().fg(color)));
+    }
+    Line::from(spans)
 }
 
 /// Time of the next sunlit/eclipsed flip after `from`, refined to
@@ -299,5 +349,47 @@ mod tests {
             drift_ms < 2000,
             "the transition instant moved by {drift_ms} ms for a 1 s shift in `from`"
         );
+    }
+
+    fn look(elevation_deg: f64, range_km: f64) -> LookAngles {
+        LookAngles { azimuth_deg: 0.0, elevation_deg, range_km }
+    }
+
+    fn line_text(l: &Line) -> String {
+        l.spans.iter().map(|s| s.content.as_ref()).collect()
+    }
+
+    /// The reported bug: `el … below horizon` ran under the right border at
+    /// every elevation, because the row wrote a fixed ~43-column line into a
+    /// 38-column panel. Now it is handed the width and must never exceed it —
+    /// at any elevation, slant range or panel size.
+    #[test]
+    fn range_row_never_exceeds_the_width_it_is_given() {
+        for budget in 20..=48usize {
+            for e in -90..=90 {
+                for &r in &[400.0_f64, 7352.0, 42_164.0] {
+                    let w = range_row(&look(e as f64, r), budget).width();
+                    assert!(w <= budget, "el {e}°, range {r}, budget {budget}: width {w}");
+                }
+            }
+        }
+    }
+
+    /// At the real inner width of the 40-column right column both states keep
+    /// their wording, so a later tightening can't quietly reduce the common
+    /// case to a bare number.
+    #[test]
+    fn range_row_keeps_its_wording_at_the_real_panel_width() {
+        assert!(line_text(&range_row(&look(-12.0, 7352.0), 38)).contains("el -"));
+        assert!(line_text(&range_row(&look(23.0, 7352.0), 38)).contains("in view"));
+    }
+
+    /// Past the point where even the short phrase fits, the elevation reading
+    /// survives and the prose is dropped — not the other way round.
+    #[test]
+    fn range_row_drops_the_prose_before_the_elevation() {
+        let t = line_text(&range_row(&look(-12.0, 7352.0), 30));
+        assert!(t.contains("-12°"), "{t:?}");
+        assert!(!t.contains("below"), "{t:?}");
     }
 }

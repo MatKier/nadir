@@ -155,6 +155,7 @@ fn content(app: &App) -> Vec<Line<'static>> {
     row(&mut l, "RANGE", "slant range and elevation from your ground station");
     row(&mut l, "TLE", "time from the element-set epoch — amber past 36h, red past 72h");
     text(&mut l, "Reads \"ahead\" instead of \"old\" when the clock is scrubbed before the epoch.");
+    text(&mut l, "The epoch itself (UTC) is shown on the panel's bottom border.");
     row(&mut l, "ACC", "modelled position error, and the along-track timing error it implies");
     text(&mut l, "Built from the element set's own drag term (B*) — re-propagated with B*");
     text(&mut l, "nudged 10% and the two positions differenced — floored by a per-regime");
