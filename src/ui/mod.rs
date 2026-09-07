@@ -9,7 +9,7 @@ mod places;
 /// saturate against it without `mod map` being made public.
 pub(crate) use map::MAX_ZOOM;
 
-use chrono::Utc;
+use chrono::{Duration as ChronoDuration, Utc};
 use ratatui::layout::{Alignment, Constraint, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
@@ -186,6 +186,30 @@ fn clock_marker(clock: &crate::simclock::SimClock) -> (String, bool) {
     }
 }
 
+/// The clock's offset from wall time, compact and signed: `Δ+2h14m`, `Δ-45m`,
+/// `Δ+3d`, `Δ+40d`. Two most-significant units at most, the finer one dropped
+/// when it is zero. Empty string for a sub-second offset, so the caller can
+/// treat "nothing worth showing" and "no room to show it" the same way.
+fn fmt_clock_offset(d: ChronoDuration) -> String {
+    let secs = d.num_seconds().abs();
+    if secs == 0 {
+        return String::new();
+    }
+    let sign = if d < ChronoDuration::zero() { '-' } else { '+' };
+    let (days, hours, mins, s) =
+        (secs / 86_400, secs / 3_600 % 24, secs / 60 % 60, secs % 60);
+    let body = if days > 0 {
+        if hours > 0 { format!("{days}d{hours}h") } else { format!("{days}d") }
+    } else if hours > 0 {
+        if mins > 0 { format!("{hours}h{mins}m") } else { format!("{hours}h") }
+    } else if mins > 0 {
+        if s > 0 { format!("{mins}m{s}s") } else { format!("{mins}m") }
+    } else {
+        format!("{s}s")
+    };
+    format!("Δ{sign}{body}")
+}
+
 fn title_bar(frame: &mut Frame, area: Rect, app: &App, data: &crate::app::AppData) {
     let coords_full = match app.config.ground_station() {
         Some(g) => format!("{:.3},{:.3}", g.lat_deg, g.lon_deg),
@@ -273,6 +297,19 @@ fn title_bar(frame: &mut Frame, area: Rect, app: &App, data: &crate::app::AppDat
         .map(|name| format!("{name} · {coords}"))
         .unwrap_or(coords);
 
+    // The wall-clock offset, e.g. `Δ+2h14m`. Shown only while the clock is
+    // scrubbed, and only if the bar still has room once everything else has
+    // claimed its width — it just restates the marker, so it is the first
+    // thing to drop and is never counted into `right_fixed_len` above.
+    let delta = if live { String::new() } else { fmt_clock_offset(app.clock.offset()) };
+    let delta_field = if !delta.is_empty()
+        && left_len + right_fixed_len + delta.chars().count() + 1 + GAP <= area.width as usize
+    {
+        format!("{delta} ")
+    } else {
+        String::new()
+    };
+
     let left = Line::from(vec![
         Span::styled(" nadir ", Style::new().fg(Color::Black).bg(Theme::ACCENT).bold()),
         Span::raw(" "),
@@ -281,6 +318,7 @@ fn title_bar(frame: &mut Frame, area: Rect, app: &App, data: &crate::app::AppDat
     let right = Line::from(vec![
         Span::styled(loc, Style::new().fg(Theme::LABEL)),
         Span::styled(up, Style::new().fg(Theme::LABEL)),
+        Span::styled(delta_field, Style::new().fg(clock_color)),
         Span::styled(marker, Style::new().fg(clock_color)),
         Span::styled(clock, Style::new().fg(clock_color)),
         Span::raw(" "),
@@ -591,6 +629,25 @@ mod tests {
     /// chips eat the left ~41 of the status bar — so this is roughly the worst
     /// case the hint has to survive.
     const NARROWEST_HINT_AREA: u16 = 80 - 41;
+
+    #[test]
+    fn clock_offset_shows_the_two_most_significant_units_signed() {
+        let d = ChronoDuration::seconds;
+        assert_eq!(fmt_clock_offset(d(60)), "Δ+1m");
+        assert_eq!(fmt_clock_offset(d(45)), "Δ+45s");
+        assert_eq!(fmt_clock_offset(d(-90)), "Δ-1m30s");
+        assert_eq!(fmt_clock_offset(d(-(2 * 3600 + 14 * 60 + 30))), "Δ-2h14m");
+        assert_eq!(fmt_clock_offset(d(3 * 3600)), "Δ+3h");
+        assert_eq!(fmt_clock_offset(d(3 * 86_400)), "Δ+3d");
+        assert_eq!(fmt_clock_offset(d(3 * 86_400 + 5 * 3600)), "Δ+3d5h");
+        assert_eq!(fmt_clock_offset(d(40 * 86_400)), "Δ+40d");
+    }
+
+    #[test]
+    fn a_sub_second_clock_offset_renders_nothing() {
+        assert_eq!(fmt_clock_offset(ChronoDuration::zero()), "");
+        assert_eq!(fmt_clock_offset(ChronoDuration::milliseconds(400)), "");
+    }
 
     #[test]
     fn tracked_hints_name_enter_and_d_at_every_width_that_shows_a_hint() {

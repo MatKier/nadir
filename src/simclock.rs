@@ -121,6 +121,12 @@ impl SimClock {
         self.offset += delta;
     }
 
+    /// `sim_now - wall_now`: how far the displayed clock sits from real time.
+    /// Exactly zero until the clock is scrubbed.
+    pub fn offset(&self) -> ChronoDuration {
+        self.offset
+    }
+
     /// Land on `target` and pause there, at 1×, given the current wall time.
     /// Used by the go-to prompt and the next-pass jumps.
     pub fn goto_from(&mut self, target: DateTime<Utc>, wall: DateTime<Utc>) {
@@ -352,6 +358,26 @@ mod tests {
         assert_eq!(c.state(), ClockState::Paused);
         c.toggle_pause();
         assert_eq!(c.state(), ClockState::Drifted);
+    }
+
+    #[test]
+    fn offset_is_zero_until_the_clock_is_scrubbed() {
+        let mut c = SimClock::new();
+        for _ in 0..1000 {
+            c.advance_by(Duration::from_millis(250));
+        }
+        assert_eq!(c.offset(), ChronoDuration::zero());
+    }
+
+    #[test]
+    fn a_paused_clock_reports_the_negative_offset_it_accumulates() {
+        let mut c = SimClock::new();
+        c.toggle_pause();
+        // 40 ticks of 250 ms = 10 s of wall time the frozen clock falls behind.
+        for _ in 0..40 {
+            c.advance_by(Duration::from_millis(250));
+        }
+        assert_eq!(c.offset(), ChronoDuration::seconds(-10));
     }
 
     #[test]
