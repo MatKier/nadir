@@ -39,3 +39,22 @@ pub(crate) const SENTINEL2A_GP_JSON: &str = r#"[{"OBJECT_NAME":"SENTINEL-2A","OB
 pub(crate) fn test_sso_tracker() -> Tracker {
     Tracker::from_gp_json(SENTINEL2A_GP_JSON).expect("fixture parses")
 }
+
+/// A *synthetic* element set — the ISS fixture with its inclination edited to
+/// exactly 90° and a made-up catalogue number. Unlike its two real neighbours
+/// above there is no cataloged satellite close enough to a true polar orbit to
+/// exercise the near-pole ground-track case, where a step straddling the pole
+/// jumps just under 180° of longitude and `split_at_antimeridian` deliberately
+/// does not split it (see `Tracker::ground_track`).
+#[cfg(test)]
+pub(crate) const POLAR_GP_JSON: &str = r#"[{"OBJECT_NAME":"SYNTHETIC POLAR","OBJECT_ID":"0000-000A",
+"EPOCH":"2026-09-04T01:53:59.631360","MEAN_MOTION":15.48983228,"ECCENTRICITY":0.0005012,
+"INCLINATION":90.0,"RA_OF_ASC_NODE":269.6269,"ARG_OF_PERICENTER":105.0359,
+"MEAN_ANOMALY":255.1184,"EPHEMERIS_TYPE":0,"CLASSIFICATION_TYPE":"U","NORAD_CAT_ID":99999,
+"ELEMENT_SET_NO":999,"REV_AT_EPOCH":58398,"BSTAR":6.928243e-5,"MEAN_MOTION_DOT":3.366e-5,
+"MEAN_MOTION_DDOT":0}]"#;
+
+#[cfg(test)]
+pub(crate) fn test_polar_tracker() -> Tracker {
+    Tracker::from_gp_json(POLAR_GP_JSON).expect("fixture parses")
+}
