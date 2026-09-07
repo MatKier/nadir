@@ -16,7 +16,7 @@ use crate::api::swpc::{AuroraGrid, Indices};
 use crate::cache::Cache;
 use crate::config::Config;
 use crate::orbit::{predict_passes, Pass, Tracker};
-use crate::simclock::SimClock;
+use crate::simclock::{ClockState, SimClock};
 use crate::source::Source;
 use crate::ui;
 
@@ -273,6 +273,16 @@ impl App {
             .map(|t| t.elapsed() > Duration::from_secs(20))
             .unwrap_or(true);
         if !scrubbed && !stale {
+            return;
+        }
+        // Only the continuous drift of a warp needs a real-time floor. A step,
+        // a `g` jump, `n`/`N` or `0` is bounded by the user's fingers and must
+        // rebuild at once — and `invalidate_passes` clears `passes_at`, so
+        // those paths never reach this test. At 1800× the 5-minute simulated
+        // window above is crossed every ~170 ms of wall time, which without
+        // this would put a full 48-hour scan inside every frame.
+        let warping = matches!(self.clock.state(), ClockState::Warp(_));
+        if warping && self.passes_at.is_some_and(|t| t.elapsed() < PASS_REBUILD_FLOOR) {
             return;
         }
         let Some(station) = self.config.ground_station() else {
@@ -798,14 +808,32 @@ pub async fn run(mut config: Config) -> Result<()> {
     result
 }
 
+/// Redraw cadence. At 1× the dashboard is a clock face and four frames a second
+/// is plenty; a warp turns it into an animation, where a 250 ms frame at 60×
+/// steps a quarter-hour of simulated time and the marker teleports rather than
+/// moves. `FRAME_WARP` sits near a terminal's key auto-repeat rate on purpose —
+/// holding a key already drove the loop that fast by waking the `select!` on
+/// every repeat, which is exactly why a held key looked smoother than a warp at
+/// the same speed.
+const FRAME_LIVE: Duration = Duration::from_millis(250);
+const FRAME_WARP: Duration = Duration::from_millis(40);
+
+/// How long to wait for the next frame. Split out of `render_loop` so the
+/// cadence can be asserted without a terminal.
+fn frame_interval(state: ClockState) -> Duration {
+    match state {
+        // Only a warp animates on its own. `Drifted` moves at real speed and
+        // `Paused` does not move at all, so both are as static as `Live`.
+        ClockState::Warp(_) => FRAME_WARP,
+        _ => FRAME_LIVE,
+    }
+}
+
 async fn render_loop(
     terminal: &mut ratatui::DefaultTerminal,
     app: &mut App,
     mut input_rx: mpsc::UnboundedReceiver<Event>,
 ) -> Result<()> {
-    let mut tick = tokio::time::interval(Duration::from_millis(250));
-    tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-
     loop {
         // Fold elapsed wall time into the simulated clock before anything
         // reads it this frame.
@@ -820,11 +848,27 @@ async fn render_loop(
             return Ok(());
         }
 
+        // `sleep` rather than an `Interval`: tokio 1.53 has no
+        // `Interval::set_period`, and a per-iteration sleep cannot build up the
+        // catch-up burst `MissedTickBehavior::Skip` used to guard against.
         tokio::select! {
-            _ = tick.tick() => {}
+            _ = tokio::time::sleep(frame_interval(app.clock.state())) => {}
             maybe_event = input_rx.recv() => {
                 match maybe_event {
-                    Some(Event::Key(key)) => app.handle_key(key),
+                    Some(Event::Key(key)) => {
+                        app.handle_key(key);
+                        // Auto-repeat can queue keys faster than a frame takes
+                        // to draw. Fold everything already waiting into this one
+                        // frame rather than drawing a frame per keystroke and
+                        // falling further behind the queue with each one.
+                        while !app.should_quit {
+                            match input_rx.try_recv() {
+                                Ok(Event::Key(k)) => app.handle_key(k),
+                                Ok(_) => {}
+                                Err(_) => break,
+                            }
+                        }
+                    }
                     Some(_) => {}
                     None => return Ok(()), // input thread ended
                 }
@@ -861,6 +905,15 @@ pub(crate) const TLE_TTL: Duration = Duration::from_secs(12 * 3600);
 pub(crate) const WEATHER_INTERVAL: Duration = Duration::from_secs(5 * 60);
 pub(crate) const AURORA_INTERVAL: Duration = Duration::from_secs(15 * 60);
 pub(crate) const LAUNCHES_INTERVAL: Duration = Duration::from_secs(30 * 60);
+
+/// The shortest real interval between two warp-driven pass-list rebuilds. A
+/// rebuild is a 48-hour scan — order six thousand SGP4 propagations, run
+/// synchronously on the render thread. The 5-minute *simulated* window in
+/// `refresh_passes` is crossed every ~170 ms of wall time at 1800×, which would
+/// put a full prediction inside every frame; a fast warp is allowed to lag the
+/// list by up to this long instead, invisible next to the 30 s coarse step
+/// `predict_passes` already scans at.
+const PASS_REBUILD_FLOOR: Duration = Duration::from_millis(500);
 
 /// One network-backed dashboard field, tied together in one place: which
 /// `AppData` slot it publishes into, which cache key it persists under, and
@@ -1397,8 +1450,6 @@ mod tests {
 
     // --- time scrubbing ---------------------------------------------------
 
-    use crate::simclock::ClockState;
-
     fn dummy_pass(aos: DateTime<Utc>, visible: bool) -> Pass {
         Pass {
             aos,
@@ -1552,5 +1603,68 @@ mod tests {
         let second = app.passes_from.expect("and rebuilt after the jump");
 
         assert!(second - first > chrono::Duration::hours(11), "the window moved with the clock");
+    }
+
+    #[test]
+    fn frame_interval_only_speeds_up_for_a_warp() {
+        // The dashboard is a 4 fps clock face unless the clock is winding
+        // itself forward — only a warp does that. A drift or a pause is as
+        // static on screen as being live.
+        assert_eq!(frame_interval(ClockState::Live), FRAME_LIVE);
+        assert_eq!(frame_interval(ClockState::Drifted), FRAME_LIVE);
+        assert_eq!(frame_interval(ClockState::Paused), FRAME_LIVE);
+        assert_eq!(frame_interval(ClockState::Warp(2)), FRAME_WARP);
+        assert_eq!(frame_interval(ClockState::Warp(-1800)), FRAME_WARP);
+    }
+
+    #[test]
+    fn a_warp_does_not_rebuild_the_pass_list_on_every_frame() {
+        let mut config = Config::default();
+        config.set_location(48.0, 11.0, None);
+        let mut app = test_app(config);
+        if let Ok(mut d) = app.data.write() {
+            d.tle.set_live(crate::orbit::test_tracker());
+        }
+        app.refresh_passes();
+        let built_for = app.passes_from.expect("the window is built once");
+
+        // Wind the rate up, then scrub an hour ahead — well past the 5-minute
+        // simulated window that forces a rebuild at 1×. Back-to-back frames of
+        // a fast warp cross that window every few milliseconds of wall time,
+        // and `PASS_REBUILD_FLOOR` is what keeps a 48-hour scan out of each one.
+        press(&mut app, '.');
+        assert!(matches!(app.clock.state(), ClockState::Warp(_)));
+        app.clock.jump(chrono::Duration::hours(1));
+        app.refresh_passes();
+
+        assert_eq!(
+            app.passes_from,
+            Some(built_for),
+            "a rebuild inside the wall-clock floor is skipped while warping",
+        );
+    }
+
+    #[test]
+    fn an_explicit_jump_still_rebuilds_at_once_despite_the_warp_floor() {
+        let mut config = Config::default();
+        config.set_location(48.0, 11.0, None);
+        let mut app = test_app(config);
+        if let Ok(mut d) = app.data.write() {
+            d.tle.set_live(crate::orbit::test_tracker());
+        }
+        app.refresh_passes();
+        let built_for = app.passes_from.expect("the window is built once");
+
+        // A 1× step leaves the clock `Drifted`, not `Warp`, so the floor does
+        // not apply — the list rebuilds immediately even though no real time
+        // has passed since the last one.
+        app.clock.jump(chrono::Duration::hours(1));
+        assert_eq!(app.clock.state(), ClockState::Drifted);
+        app.refresh_passes();
+
+        assert!(
+            app.passes_from.expect("rebuilt") - built_for > chrono::Duration::minutes(50),
+            "the window moved with the clock",
+        );
     }
 }
