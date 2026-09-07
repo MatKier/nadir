@@ -280,7 +280,7 @@ impl App {
         // rebuild at once — and `invalidate_passes` clears `passes_at`, so
         // those paths never reach this test. At 1800× the 5-minute simulated
         // window above is crossed every ~170 ms of wall time, which without
-        // this would put a full 48-hour scan inside every frame.
+        // this would put a full 96-hour scan inside every frame.
         let warping = matches!(self.clock.state(), ClockState::Warp(_));
         if warping && self.passes_at.is_some_and(|t| t.elapsed() < PASS_REBUILD_FLOOR) {
             return;
@@ -298,7 +298,7 @@ impl App {
             // nothing.
             return;
         };
-        self.passes = predict_passes(&tr, &station, now, chrono::Duration::hours(48), 12);
+        self.passes = predict_passes(&tr, &station, now, chrono::Duration::hours(96), 24);
         self.passes_at = Some(Instant::now());
         self.passes_from = Some(now);
     }
@@ -907,12 +907,14 @@ pub(crate) const AURORA_INTERVAL: Duration = Duration::from_secs(15 * 60);
 pub(crate) const LAUNCHES_INTERVAL: Duration = Duration::from_secs(30 * 60);
 
 /// The shortest real interval between two warp-driven pass-list rebuilds. A
-/// rebuild is a 48-hour scan — order six thousand SGP4 propagations, run
-/// synchronously on the render thread. The 5-minute *simulated* window in
-/// `refresh_passes` is crossed every ~170 ms of wall time at 1800×, which would
-/// put a full prediction inside every frame; a fast warp is allowed to lag the
-/// list by up to this long instead, invisible next to the 30 s coarse step
-/// `predict_passes` already scans at.
+/// rebuild is a 96-hour scan — order twelve thousand SGP4 propagations, run
+/// synchronously on the render thread, and measured at ~7 ms in a release
+/// build: cheap in absolute terms, well under a 250 ms frame. What this floor
+/// guards against is not the cost of one scan but their *rate*: the 5-minute
+/// *simulated* window in `refresh_passes` is crossed every ~170 ms of wall
+/// time at 1800×, which without a floor would put a rebuild inside every
+/// frame. A fast warp is allowed to lag the list by up to this long instead,
+/// invisible next to the 30 s coarse step `predict_passes` already scans at.
 const PASS_REBUILD_FLOOR: Duration = Duration::from_millis(500);
 
 /// One network-backed dashboard field, tied together in one place: which
@@ -1631,7 +1633,7 @@ mod tests {
         // Wind the rate up, then scrub an hour ahead — well past the 5-minute
         // simulated window that forces a rebuild at 1×. Back-to-back frames of
         // a fast warp cross that window every few milliseconds of wall time,
-        // and `PASS_REBUILD_FLOOR` is what keeps a 48-hour scan out of each one.
+        // and `PASS_REBUILD_FLOOR` is what keeps a 96-hour scan out of each one.
         press(&mut app, '.');
         assert!(matches!(app.clock.state(), ClockState::Warp(_)));
         app.clock.jump(chrono::Duration::hours(1));

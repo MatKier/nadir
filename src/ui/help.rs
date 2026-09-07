@@ -166,7 +166,7 @@ fn content(app: &App) -> Vec<Line<'static>> {
     blank(&mut l);
 
     heading(&mut l, "Next passes");
-    text(&mut l, "Passes peaking above 10° elevation within the next 48h, recomputed");
+    text(&mut l, "Passes peaking above 10° elevation within the next 96h, recomputed");
     text(&mut l, "every 20s. Each row: day, AOS–LOS in local time, duration in");
     text(&mut l, "minutes, peak elevation, and the AOS→LOS compass azimuths.");
     row(&mut l, "★", "visible to the naked eye — satellite sunlit while you're in darkness");
