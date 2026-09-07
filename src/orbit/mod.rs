@@ -1,10 +1,12 @@
 //! Local orbital mechanics: SGP4 propagation, ground tracks, solar geometry and
 //! pass prediction. None of this touches the network — a cached TLE is enough.
 
+pub mod accuracy;
 pub mod passes;
 pub mod propagate;
 pub mod solar;
 
+pub use accuracy::{Accuracy, Confidence};
 pub use passes::{predict_passes, Pass};
 pub use propagate::{OrbitClass, OrbitPlane, OrbitShape, SatState, Tracker};
 
@@ -57,4 +59,23 @@ pub(crate) const POLAR_GP_JSON: &str = r#"[{"OBJECT_NAME":"SYNTHETIC POLAR","OBJ
 #[cfg(test)]
 pub(crate) fn test_polar_tracker() -> Tracker {
     Tracker::from_gp_json(POLAR_GP_JSON).expect("fixture parses")
+}
+
+/// A *synthetic* deep-space element set: a near-circular geostationary orbit
+/// with `BSTAR` forced to exactly zero, which real GEO element sets very often
+/// carry. With no drag term the B\*-sensitivity probe in `orbit::accuracy`
+/// measures nothing, so this fixture is what proves the per-regime error floor
+/// still produces a growing estimate on its own. Like `POLAR_GP_JSON` it is
+/// hand-built: a catalogued GEO's `BSTAR` is usually a small non-zero fit
+/// artefact rather than a clean zero.
+#[cfg(test)]
+pub(crate) const GEO_ZERO_DRAG_GP_JSON: &str = r#"[{"OBJECT_NAME":"SYNTHETIC GEO","OBJECT_ID":"0000-000B",
+"EPOCH":"2026-09-04T00:00:00.000000","MEAN_MOTION":1.00273790,"ECCENTRICITY":0.0001500,
+"INCLINATION":0.0400,"RA_OF_ASC_NODE":95.0000,"ARG_OF_PERICENTER":270.0000,
+"MEAN_ANOMALY":90.0000,"EPHEMERIS_TYPE":0,"CLASSIFICATION_TYPE":"U","NORAD_CAT_ID":99998,
+"ELEMENT_SET_NO":999,"REV_AT_EPOCH":12000,"BSTAR":0,"MEAN_MOTION_DOT":0,"MEAN_MOTION_DDOT":0}]"#;
+
+#[cfg(test)]
+pub(crate) fn test_geo_zero_drag_tracker() -> Tracker {
+    Tracker::from_gp_json(GEO_ZERO_DRAG_GP_JSON).expect("fixture parses")
 }

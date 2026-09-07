@@ -25,10 +25,24 @@ terminator and pass predictions.
 
 Only the element set needs the network, and at most every 12 hours. It is cached
 at `~/.cache/nadir/tle-<norad>.json` and keyed by cache age rather than process
-lifetime, so a restart with a cache under 12h old reads from disk. Accuracy
-decays away from the epoch — roughly a kilometre near it, growing to tens of
-kilometres after a week in low Earth orbit — which is what the telemetry panel's
-`TLE` age field (amber past 36h, red past 72h) indicates.
+lifetime, so a restart with a cache under 12h old reads from disk.
+
+### Accuracy
+
+A propagated position is an estimate, and it gets worse the further the
+displayed time is from the element set's epoch — the more so once you start
+scrubbing the clock days out. The telemetry panel's `ACC` row puts a number on
+it. A TLE carries no formal error, so this is a model, built from what the
+element set does reveal about its own quality: nadir re-propagates with the drag
+term `B*` nudged by 10% and measures how far the position moves, then floors
+that against a per-regime growth rate. The result is satellite-specific — a
+decaying LEO degrades several times faster than a quiet orbit well above the
+drag — and it lands near the long-standing rule of thumb of ~1 km at epoch
+growing to tens of km after a week in low orbit. The along-track part is a
+timing error, so it also shows as `±N s`, and as a footer on the pass list
+bounding how far the AOS/LOS times could slip. Past 30 days from epoch the model
+stops quoting a figure: SGP4 still returns a position, but nothing local can say
+how wrong it is.
 
 The remaining panels do need the network: space weather, the aurora nowcast, and
 the launch manifest. Each source fails independently — a dead feed degrades its
@@ -140,8 +154,9 @@ vehicle name, site and coordinates, for as long as the row stays highlighted.
 The clock keys detach the display from wall time so you can watch a pass play
 out, step to where the satellite will be, or run the ground track backwards.
 Everything geometric follows the simulated clock — the map, telemetry, the pass
-list, and the `TLE` age field's amber/red thresholds (accuracy really does decay
-that far from the epoch). What stays on the real clock: the feed-status chips and
+list, and the `TLE` and `ACC` fields, which is the point: scrub a week out and
+`ACC` climbs into the tens of km so the confident-looking map can't mislead you.
+What stays on the real clock: the feed-status chips and
 their ages, session uptime, and the launch countdown — those track real events,
 not the view. The title-bar clock turns amber with a marker (`▸` drifted, `‖`
 paused, `▸▸60x` / `◂◂5x` warp) whenever it is not live, so the display can never
@@ -169,9 +184,11 @@ measured from the WGS-84 equatorial radius rather than `ALT`'s local ellipsoid,
 so the two can read up to ~20 km apart away from the equator · `REV` approximate
 revolution number since launch · `SUN` sunlit/eclipsed and time to the next
 transition · `RANGE` slant range and elevation from your ground station · `TLE`
-age of the element set since its epoch. The title bar also shows the
-satellite's COSPAR international designator next to its NORAD id, when the
-terminal is wide enough to fit it.
+time from the element-set epoch (reads *ahead* when the clock is scrubbed before
+it) · `ACC` a modelled position error and the along-track timing error it
+implies — see [Accuracy](#accuracy). The title bar also shows the satellite's
+COSPAR international designator next to its NORAD id, when the terminal is wide
+enough to fit it.
 
 **Map** — the whole world by default; `f` zooms to a window centred on the
 satellite, wrapping across the dateline to keep it dead centre. `+` / `-` step

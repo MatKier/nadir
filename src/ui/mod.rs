@@ -133,7 +133,7 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
         map::draw(frame, map_area, app, sat_state.as_ref(), now, pad);
         panels::tracked::draw(frame, tracked, app);
         panels::telemetry::draw(frame, telem, app, sat_state.as_ref(), data.tle.get().is_some(), now);
-        panels::passes::draw(frame, passes, app, now);
+        panels::passes::draw(frame, passes, app, sat_state.as_ref(), now);
         panels::weather::draw(frame, weather, app, &data);
         panels::launches::draw(frame, launches, app, &data, wall_now);
         status_bar(frame, status, app, &data);

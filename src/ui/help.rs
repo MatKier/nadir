@@ -151,7 +151,15 @@ fn content(app: &App) -> Vec<Line<'static>> {
     row(&mut l, "REV", "approximate revolution number since launch");
     row(&mut l, "SUN", "sunlit or eclipsed, and time to the next sunrise/sunset");
     row(&mut l, "RANGE", "slant range and elevation from your ground station");
-    row(&mut l, "TLE", "age of the element set since its epoch — amber past 36h, red past 72h");
+    row(&mut l, "TLE", "time from the element-set epoch — amber past 36h, red past 72h");
+    text(&mut l, "Reads \"ahead\" instead of \"old\" when the clock is scrubbed before the epoch.");
+    row(&mut l, "ACC", "modelled position error, and the along-track timing error it implies");
+    text(&mut l, "Built from the element set's own drag term (B*) — re-propagated with B*");
+    text(&mut l, "nudged 10% and the two positions differenced — floored by a per-regime");
+    text(&mut l, "growth rate. So it is satellite-specific: a decaying LEO degrades faster");
+    text(&mut l, "than a quiet high orbit. Amber past 3 days from epoch, red past 2 weeks;");
+    text(&mut l, "past 30 days it reads \"beyond\" — SGP4 still answers, but nothing here can");
+    text(&mut l, "say how wrong it is.");
     blank(&mut l);
 
     heading(&mut l, "Next passes");
@@ -159,6 +167,8 @@ fn content(app: &App) -> Vec<Line<'static>> {
     text(&mut l, "every 20s. Each row: day, AOS–LOS in local time, duration in");
     text(&mut l, "minutes, peak elevation, and the AOS→LOS compass azimuths.");
     row(&mut l, "★", "visible to the naked eye — satellite sunlit while you're in darkness");
+    text(&mut l, "A footer appears when the ACC timing error above exceeds a second,");
+    text(&mut l, "bounding how far the AOS/LOS times on screen could slip.");
     text(&mut l, "The panel title names your ground station and its UTC offset — the");
     text(&mut l, "same offset the AOS–LOS times above are shown in.");
     blank(&mut l);
@@ -224,7 +234,8 @@ fn content(app: &App) -> Vec<Line<'static>> {
     text(&mut l, "age rather than session length — a restart with a cache under 12h old");
     text(&mut l, "reads it straight from disk instead of refetching. Accuracy decays");
     text(&mut l, "away from that epoch — roughly a km near it, tens of km after a week");
-    text(&mut l, "in low orbit — which is exactly what the amber/red TLE age means.");
+    text(&mut l, "in low orbit — which the TELEMETRY panel's ACC row estimates and the");
+    text(&mut l, "amber/red TLE age flags.");
     text(&mut l, "What can't be computed, and so goes stale or blank offline: space");
     text(&mut l, "weather, aurora, and the launch manifest.");
     text(&mut l, "--offline makes zero network requests and loads the last cached");

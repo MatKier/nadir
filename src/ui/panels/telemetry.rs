@@ -9,7 +9,7 @@ use ratatui::Frame;
 
 use crate::app::{App, Panel};
 use crate::geo::look_angles;
-use crate::orbit::{SatState, Tracker};
+use crate::orbit::{Confidence, SatState, Tracker};
 use crate::ui::panels::fmt::{dim, kv, label};
 use crate::ui::{is_focused, panel_block, Theme};
 
@@ -18,8 +18,8 @@ use crate::ui::{is_focused, panel_block, Theme};
 const VALUE_W: usize = 8;
 
 /// Rows `draw` always emits, once an element set is available: ALT, SPD, POS,
-/// FOOT, ORB, APSIS, REV, SUN, TLE.
-const ALWAYS_BODY_ROWS: u16 = 9;
+/// FOOT, ORB, APSIS, REV, SUN, TLE, ACC.
+const ALWAYS_BODY_ROWS: u16 = 10;
 
 /// Height `draw` needs, including its two border rows. `ui::draw` sizes the
 /// panel from this rather than a constant because one row is conditional —
@@ -124,21 +124,62 @@ pub fn draw(
                 ]));
             }
 
+            // `element_age` is signed — a backward scrub puts `now` before the
+            // epoch — so the colour keys off the magnitude, and a negative age
+            // reads "ahead" rather than a bare "-3d old".
             let age = tr.element_age(now);
-            let age_color = if age > Duration::hours(72) {
+            let age_color = if age.abs() > Duration::hours(72) {
                 Theme::ALERT
-            } else if age > Duration::hours(36) {
+            } else if age.abs() > Duration::hours(36) {
                 Theme::CAUTION
             } else {
                 Theme::LABEL
             };
+            let (age_num, age_rel) = if age < Duration::zero() {
+                (fmt_dur_coarse(-age), "ahead")
+            } else {
+                (fmt_dur_coarse(age), "old")
+            };
             rows.push(Line::from(vec![
                 label("TLE"),
                 Span::styled(
-                    format!("{:>VALUE_W$} old", fmt_dur_coarse(age)),
+                    format!("{age_num:>VALUE_W$} {age_rel}"),
                     Style::new().fg(age_color),
                 ),
             ]));
+
+            // What that age costs you: a modelled position error, from the
+            // element set's own drag term and its orbital regime (see
+            // `orbit::accuracy`). The along-track part doubles as a timing
+            // error on the ground track. Past the model's validity horizon
+            // SGP4 still answers but nothing here can bound how wrong it is, so
+            // don't imply a figure — mirrors the "can't propagate" branch
+            // above, for the softer failure.
+            let acc = tr.accuracy_at(now, s.speed_kms);
+            let acc_color = match acc.confidence {
+                Confidence::Nominal => Theme::LABEL,
+                Confidence::Degraded => Theme::CAUTION,
+                Confidence::Unreliable | Confidence::Unmodelled => Theme::ALERT,
+            };
+            let acc_row = match acc.confidence {
+                Confidence::Unmodelled => vec![
+                    label("ACC"),
+                    Span::styled(format!("{:>VALUE_W$}", "beyond"), Style::new().fg(acc_color)),
+                    Span::styled("  model validity", Style::new().fg(Theme::LABEL)),
+                ],
+                _ => vec![
+                    label("ACC"),
+                    Span::styled(
+                        format!("{:>VALUE_W$}", format!("±{:.0} km", acc.total_km)),
+                        Style::new().fg(acc_color),
+                    ),
+                    Span::styled(
+                        format!("  ±{:.1} s along-track", acc.timing_s),
+                        Style::new().fg(Theme::LABEL),
+                    ),
+                ],
+            };
+            rows.push(Line::from(acc_row));
         }
     }
 
@@ -219,6 +260,7 @@ mod tests {
             format!("{:>VALUE_W$}", "sunlit"),         // SUN
             format!("{:>VALUE_W$.0}", 7352.0_f64),     // RANGE
             format!("{:>VALUE_W$}", "18h"),            // TLE
+            format!("{:>VALUE_W$}", "±2 km"),          // ACC
         ]
     }
 
