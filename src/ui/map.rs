@@ -213,9 +213,12 @@ fn paint_scene(
 
     if let Some(g) = scene.station {
         if grid.contains(g.lon_deg) {
+            // Printed from the centre of its resolved cell, and from the same
+            // column/row indices `draw_places` seeds into its collision set,
+            // so the glyph and its reservation stay on one cell.
             ctx.print(
-                g.lon_deg,
-                g.lat_deg,
+                grid.x_print_of(grid.col_of(g.lon_deg)),
+                grid.y_print_of(grid.row_of(g.lat_deg)),
                 Span::styled("▲", Style::new().fg(Theme::STATION).bold()),
             );
         }
@@ -250,9 +253,10 @@ fn paint_scene(
         None => {
             // `sat` is `None` only when follow mode is off, so this is always
             // the single whole-world pane — one placeholder, anchored 30% in.
+            let col = (f64::from(grid.cols()) * 0.30) as u16;
             ctx.print(
-                grid.x[0] + (grid.x[1] - grid.x[0]) * 0.30,
-                0.0,
+                grid.x_print_of(col),
+                grid.y_print_of(grid.row_of(0.0)),
                 Span::styled("acquiring element set…", Style::new().fg(Theme::LABEL)),
             );
         }
@@ -559,9 +563,24 @@ impl Grid {
         self.x[0] * (1.0 - t) + self.x[1] * t
     }
 
-    /// Degrees of latitude spanned by one cell row.
-    fn deg_per_row(&self) -> f64 {
-        (self.y[1] - self.y[0]) / (self.rows() - 1) as f64
+    /// The x-coordinate to hand `ctx.print` for a label meant to land on
+    /// `col`. [`x_of`](Grid::x_of) returns the column's *left edge*, and
+    /// ratatui places a label with a truncating cast (`Canvas::render`), so an
+    /// edge coordinate drops into the previous column whenever rounding lands
+    /// it a hair short. Aiming at the column *centre* — half a cell of
+    /// headroom, vast against ULP-scale error — makes the cast land on `col`
+    /// every time. That matters because in follow mode the bounds shift every
+    /// frame, so an edge coordinate flips back and forth across the boundary
+    /// and the label jitters a cell with it. Clamped inside the bounds so the
+    /// end columns don't nudge a hair past an edge, where the label filter
+    /// would discard the print outright.
+    fn x_print_of(&self, col: u16) -> f64 {
+        let cols = self.cols();
+        if cols < 2 {
+            return self.x_of(col);
+        }
+        let half = (self.x[1] - self.x[0]) / (2.0 * (cols - 1) as f64);
+        (self.x_of(col) + half).clamp(self.x[0].min(self.x[1]), self.x[0].max(self.x[1]))
     }
 
     /// The y-coordinate at the top edge of cell row `row` — the inverse of
@@ -580,6 +599,20 @@ impl Grid {
         }
         let t = row as f64 / (rows - 1) as f64;
         self.y[1] * (1.0 - t) + self.y[0] * t
+    }
+
+    /// [`x_print_of`](Grid::x_print_of)'s twin on the latitude axis: the
+    /// y-coordinate at the *centre* of row `row`, so ratatui's truncating
+    /// label cast lands on that row rather than the one above it. Same
+    /// follow-mode reasoning — the y bounds move with the satellite every
+    /// frame — and same clamp inside the bounds.
+    fn y_print_of(&self, row: u16) -> f64 {
+        let rows = self.rows();
+        if rows < 2 {
+            return self.y_of(row);
+        }
+        let half = (self.y[1] - self.y[0]) / (2.0 * (rows - 1) as f64);
+        (self.y_of(row) - half).clamp(self.y[0].min(self.y[1]), self.y[0].max(self.y[1]))
     }
 
     /// The cell row a y-coordinate lands on — [`Grid::col_of`]'s twin on the
@@ -629,36 +662,45 @@ fn print_marker(ctx: &mut Context<'_>, grid: &Grid, lon: f64, lat: f64, marker: 
     // far outside a narrow follow window used to have its label pinned to the
     // map edge, because `col_of` saturated to the last column and the label
     // then flipped left onto an in-bounds coordinate.
-    let Some(layout) = label_layout(grid, lon, marker) else {
+    let Some(layout) = label_layout(grid, lon, lat, marker) else {
         return;
     };
 
     let MarkerLabel { glyph, color, detail, .. } = *marker;
     let glyph_span = || Span::styled(glyph.to_string(), Style::new().fg(color).bold());
 
+    // Every line is printed from the *centre* of a resolved cell rather than
+    // the raw `lon`/`lat` or a column's left edge. `marker_cells` reserves
+    // cells from these same column/row indices, so the glyph lands exactly
+    // where the reservation says — and, in follow mode, on a cell that holds
+    // still between frames instead of flipping across a truncation boundary as
+    // the bounds slide (which left a `TRACK_FUTURE`-blue smear where the label
+    // kept vacating and reclaiming a cell). See `x_print_of`.
+    let y = grid.y_print_of(layout.row);
+
     // No room for a name, or none given: just the glyph.
     if layout.shown.is_empty() {
-        ctx.print(lon, lat, glyph_span());
+        ctx.print(grid.x_print_of(layout.marker_col), y, glyph_span());
         return;
     }
 
     let shown = layout.shown.as_str();
     if layout.right_side {
         ctx.print(
-            lon,
-            lat,
+            grid.x_print_of(layout.marker_col),
+            y,
             Line::from(vec![glyph_span(), Span::styled(format!(" {shown}"), Style::new().fg(color))]),
         );
     } else {
         ctx.print(
-            grid.x_of(layout.start_col),
-            lat,
+            grid.x_print_of(layout.start_col),
+            y,
             Line::from(vec![Span::styled(format!("{shown} "), Style::new().fg(color)), glyph_span()]),
         );
     }
 
     if let Some(detail) = detail {
-        print_detail_line(ctx, grid, layout.text_col, lat, detail);
+        print_detail_line(ctx, grid, layout.text_col, layout.row, detail);
     }
 }
 
@@ -671,6 +713,10 @@ struct LabelLayout {
     shown: String,
     /// Column of the glyph itself.
     marker_col: u16,
+    /// Cell row the glyph and name sit on. Resolved here, like the columns,
+    /// so [`print_marker`] and [`marker_cells`] read the *same* row and can't
+    /// drift a cell apart between the drawn glyph and its reserved cells.
+    row: u16,
     /// Column the first drawn line starts at — the glyph or the text,
     /// whichever is leftmost.
     start_col: u16,
@@ -678,20 +724,22 @@ struct LabelLayout {
     text_col: u16,
 }
 
-/// Compute [`LabelLayout`] for `marker` at longitude `lon`. `None` when the
+/// Compute [`LabelLayout`] for `marker` at `(lon, lat)`. `None` when the
 /// marker is outside this pane's window.
-fn label_layout(grid: &Grid, lon: f64, marker: &MarkerLabel<'_>) -> Option<LabelLayout> {
+fn label_layout(grid: &Grid, lon: f64, lat: f64, marker: &MarkerLabel<'_>) -> Option<LabelLayout> {
     if !grid.contains(lon) {
         return None;
     }
     let cols = grid.cols();
     let marker_col = grid.col_of(lon);
+    let row = grid.row_of(lat);
 
     if cols < 2 || marker.name.is_empty() {
         return Some(LabelLayout {
             right_side: true,
             shown: String::new(),
             marker_col,
+            row,
             start_col: marker_col,
             text_col: marker_col,
         });
@@ -711,7 +759,7 @@ fn label_layout(grid: &Grid, lon: f64, marker: &MarkerLabel<'_>) -> Option<Label
         (start, start)
     };
 
-    Some(LabelLayout { right_side, shown, marker_col, start_col, text_col })
+    Some(LabelLayout { right_side, shown, marker_col, row, start_col, text_col })
 }
 
 /// The cells [`print_marker`] draws `marker`'s label into on this grid: one
@@ -719,11 +767,11 @@ fn label_layout(grid: &Grid, lon: f64, marker: &MarkerLabel<'_>) -> Option<Label
 /// is one. Empty when the marker isn't in this pane's window. [`draw_places`]
 /// uses it to keep place labels off the markers and off each other.
 fn marker_cells(grid: &Grid, lon: f64, lat: f64, marker: &MarkerLabel<'_>) -> Vec<Cells> {
-    let Some(layout) = label_layout(grid, lon, marker) else {
+    let Some(layout) = label_layout(grid, lon, lat, marker) else {
         return Vec::new();
     };
     let last = grid.cols().saturating_sub(1);
-    let row = grid.row_of(lat);
+    let row = layout.row;
 
     if layout.shown.is_empty() {
         return vec![Cells { row, from: layout.marker_col, to: layout.marker_col }];
@@ -737,53 +785,49 @@ fn marker_cells(grid: &Grid, lon: f64, lat: f64, marker: &MarkerLabel<'_>) -> Ve
         vec![Cells { row, from: layout.start_col, to: (layout.start_col + shown_len + 1).min(last) }];
 
     if let Some(detail) = marker.detail {
-        if let Some(cells) = detail_cells(grid, layout.text_col, lat, detail) {
+        if let Some(cells) = detail_cells(grid, layout.text_col, layout.row, detail) {
             out.push(cells);
         }
     }
     out
 }
 
-/// The dim second line of a marker's label: one cell row below it, or above
-/// when a row below would fall outside the visible bounds.
-fn print_detail_line(ctx: &mut Context<'_>, grid: &Grid, text_col: u16, lat: f64, text: &str) {
+/// The cell row a marker's detail line lands on: the row below the marker, or
+/// the row above when the marker is on the last visible row. `None` on a grid
+/// too short to hold a second line. Shared by [`print_detail_line`] and
+/// [`detail_cells`] so the drawn row and the reserved row can't disagree —
+/// they used to each re-derive it from `lat ± deg_per_row`, which rounded
+/// inconsistently near the bottom edge.
+fn detail_row(grid: &Grid, marker_row: u16) -> Option<u16> {
     if grid.rows() < 2 {
-        return;
+        return None;
     }
-    let deg_per_row = grid.deg_per_row();
-    let mut y = lat - deg_per_row;
-    if y < grid.y[0] {
-        y = lat + deg_per_row;
-    }
-    if y > grid.y[1] {
-        return;
-    }
+    Some(if marker_row + 1 < grid.rows() { marker_row + 1 } else { marker_row - 1 })
+}
 
+/// The dim second line of a marker's label, printed from the centre of its
+/// resolved cell (see [`print_marker`]).
+fn print_detail_line(ctx: &mut Context<'_>, grid: &Grid, text_col: u16, marker_row: u16, text: &str) {
+    let Some(row) = detail_row(grid, marker_row) else {
+        return;
+    };
     let budget = grid.cols().saturating_sub(text_col) as usize;
-    let x = grid.x_of(text_col);
-    ctx.print(x, y, Span::styled(truncate(text, budget), Style::new().fg(Theme::LABEL)));
+    ctx.print(
+        grid.x_print_of(text_col),
+        grid.y_print_of(row),
+        Span::styled(truncate(text, budget), Style::new().fg(Theme::LABEL)),
+    );
 }
 
 /// The cells [`print_detail_line`] would occupy, or `None` when it would draw
-/// nothing (a one-row grid, or the detail row falling below the visible
-/// band). Mirrors that function's own row choice — one row below the marker,
-/// or one above at the bottom edge.
-fn detail_cells(grid: &Grid, text_col: u16, lat: f64, text: &str) -> Option<Cells> {
-    if grid.rows() < 2 {
-        return None;
-    }
-    let deg_per_row = grid.deg_per_row();
-    let mut y = lat - deg_per_row;
-    if y < grid.y[0] {
-        y = lat + deg_per_row;
-    }
-    if y > grid.y[1] {
-        return None;
-    }
+/// nothing (a grid too short for a second line). Reads the same [`detail_row`]
+/// the drawing does.
+fn detail_cells(grid: &Grid, text_col: u16, marker_row: u16, text: &str) -> Option<Cells> {
+    let row = detail_row(grid, marker_row)?;
     let last = grid.cols().saturating_sub(1);
     let len = truncate(text, grid.cols().saturating_sub(text_col) as usize).chars().count() as u16;
     Some(Cells {
-        row: grid.row_of(y),
+        row,
         from: text_col,
         to: (text_col + len.saturating_sub(1)).min(last),
     })
@@ -1175,6 +1219,80 @@ mod tests {
         Grid { inner: Rect::new(0, 0, cols, rows), x, y }
     }
 
+    /// The column ratatui's `Canvas::render` truncates a label's x-coordinate
+    /// onto — `((x - left) * (cols - 1) / width) as u16`. Reproduced here (it
+    /// lives in ratatui and isn't exported) so a test can check what
+    /// [`Grid::x_print_of`] actually feeds it.
+    fn ratatui_label_col(x_bounds: [f64; 2], cols: u16, x: f64) -> u16 {
+        let width = (x_bounds[1] - x_bounds[0]).abs();
+        ((x - x_bounds[0]) * f64::from(cols - 1) / width) as u16
+    }
+
+    /// [`ratatui_label_col`]'s row twin — `((top - y) * (rows - 1) / height)`.
+    fn ratatui_label_row(y_bounds: [f64; 2], rows: u16, y: f64) -> u16 {
+        let height = (y_bounds[1] - y_bounds[0]).abs();
+        ((y_bounds[1] - y) * f64::from(rows - 1) / height) as u16
+    }
+
+    #[test]
+    fn a_print_coordinate_lands_on_its_own_cell_at_every_width() {
+        // x_print_of / y_print_of must hand ratatui a coordinate whose
+        // truncating label cast comes back as the exact column/row asked for,
+        // for *every* cell — x_of's left-edge coordinate misses on roughly a
+        // quarter of them, and in follow mode those are the cells that flicker.
+        for &cols in &[80u16, 100, 120, 161, 200, 237, 300] {
+            for &rows in &[20u16, 28, 40, 55, 60] {
+                let g = map_grid(cols, rows, [-180.0, 180.0], [-90.0, 90.0]);
+                for col in 0..cols {
+                    assert_eq!(
+                        ratatui_label_col(g.x, cols, g.x_print_of(col)),
+                        col,
+                        "col {col} of {cols} placed elsewhere"
+                    );
+                }
+                for row in 0..rows {
+                    assert_eq!(
+                        ratatui_label_row(g.y, rows, g.y_print_of(row)),
+                        row,
+                        "row {row} of {rows} placed elsewhere"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn a_follow_window_that_moves_every_frame_never_shifts_a_label_by_a_cell() {
+        // Follow mode rebuilds the view bounds from the satellite's own
+        // position every frame (`view_bounds`), so a coordinate on a cell edge
+        // keeps crossing ratatui's truncation boundary and the label — an
+        // opaque multi-cell run — jitters, smearing the future track's blue
+        // into the cell it keeps vacating. Sweeping the satellite across the
+        // map at every zoom, a fixed layout cell must resolve to that same
+        // cell on every frame.
+        let (cols, rows) = (200u16, 50u16);
+        for zoom in 0..=MAX_ZOOM {
+            let mut lon = -179.0_f64;
+            while lon < 179.0 {
+                let lat = 45.0 * lon.to_radians().sin();
+                let centre = GeoPoint::new(lat, lon, 420.0);
+                let (x, y) = view_bounds(Some(&centre), zoom);
+                let g = map_grid(cols, rows, x, y);
+                assert_eq!(
+                    ratatui_label_col(g.x, cols, g.x_print_of(cols / 2)),
+                    cols / 2,
+                    "column moved at lon {lon:.1}, zoom {zoom}"
+                );
+                assert_eq!(
+                    ratatui_label_row(g.y, rows, g.y_print_of(rows / 3)),
+                    rows / 3,
+                    "row moved at lon {lon:.1}, zoom {zoom}"
+                );
+                lon += 0.37;
+            }
+        }
+    }
+
     #[test]
     fn claimed_rejects_a_nearby_label_and_accepts_a_separated_one() {
         let mut c = Claimed::default();
@@ -1201,7 +1319,7 @@ mod tests {
         // column, so the run is name-length + 2 wide starting there.
         let m = MarkerLabel { glyph: "·", color: Theme::PLACE, name: "Nairobi", detail: None };
         let (lat, lon) = (-1.29, 36.82);
-        let layout = label_layout(&g, lon, &m).unwrap();
+        let layout = label_layout(&g, lon, lat, &m).unwrap();
         assert!(layout.right_side, "a short name near mid-map goes right");
         let shown = layout.shown.chars().count() as u16;
         let cells = marker_cells(&g, lon, lat, &m);
@@ -1209,12 +1327,17 @@ mod tests {
         assert_eq!(cells[0].row, g.row_of(lat));
         assert_eq!(cells[0].from, g.col_of(lon));
         assert_eq!(cells[0].to, (g.col_of(lon) + shown + 1).min(g.cols() - 1));
+        // The glyph ratatui actually places from `print_marker`'s coordinate
+        // must be the column `marker_cells` reserved from — the property the
+        // jitter fix turns on.
+        assert_eq!(ratatui_label_col(g.x, g.cols(), g.x_print_of(layout.marker_col)), cells[0].from);
+        assert_eq!(ratatui_label_row(g.y, g.rows(), g.y_print_of(layout.row)), cells[0].row);
 
         // Left-side label near the right edge: `name ' ' glyph` printed from
         // `start_col`, glyph landing on the marker column.
         let m = MarkerLabel { glyph: "·", color: Theme::PLACE, name: "Vladivostok", detail: None };
         let (lat, lon) = (43.12, 172.5);
-        let layout = label_layout(&g, lon, &m).unwrap();
+        let layout = label_layout(&g, lon, lat, &m).unwrap();
         assert!(!layout.right_side, "a long name at the right edge flips left");
         let shown = layout.shown.chars().count() as u16;
         let cells = marker_cells(&g, lon, lat, &m);
@@ -1222,6 +1345,9 @@ mod tests {
         assert_eq!(cells[0].to, (layout.start_col + shown + 1).min(g.cols() - 1));
         // The glyph sits on (or just left of, after saturation) the marker col.
         assert!(cells[0].to >= layout.marker_col.saturating_sub(1));
+        // Left-side run: ratatui places its first glyph on `start_col`, the
+        // column the reservation starts at.
+        assert_eq!(ratatui_label_col(g.x, g.cols(), g.x_print_of(layout.start_col)), cells[0].from);
     }
 
     #[test]
