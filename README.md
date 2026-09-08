@@ -185,8 +185,9 @@ measured from the WGS-84 equatorial radius rather than `ALT`'s local ellipsoid,
 so the two can read up to ~20 km apart away from the equator · `REV` approximate
 revolution number since launch · `SUN` sunlit/eclipsed and time to the next
 transition · `RANGE` slant range and elevation from your ground station · `TLE`
-time from the element-set epoch, with the epoch itself (UTC) on the panel's
-bottom border (reads *ahead* when the clock is scrubbed before it) · `ACC` a
+time from the element-set epoch and the epoch itself (UTC), e.g.
+`18h since 09-06 23:11Z` — reads *before* instead of *since* when the clock is
+scrubbed ahead of the epoch · `ACC` a
 modelled position error and the along-track timing error it implies — see
 [Accuracy](#accuracy). The title bar also shows the satellite's
 COSPAR international designator next to its NORAD id, when the terminal is wide
@@ -208,8 +209,7 @@ speed · `Bz` north–south interplanetary field (strongly negative drives auror
 0–5 · `AUR` aurora probability overhead at your ground station.
 
 Space Weather and Launches show their feed's age under the panel title once it
-has gone stale, e.g. `space weather · 1m old`; Telemetry likewise carries the
-element-set epoch on its bottom border.
+has gone stale, e.g. `space weather · 1m old`.
 
 **Status chips** (bottom left: `TLE` `SWX` `AUR` `LCH`) — each shows `wait`
 (nothing fetched yet this session), `live`, an age such as `5s` / `12m` since

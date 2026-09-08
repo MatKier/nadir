@@ -10,7 +10,7 @@ use ratatui::Frame;
 use crate::app::{App, Panel};
 use crate::geo::{look_angles, LookAngles};
 use crate::orbit::{Confidence, SatState, Tracker};
-use crate::ui::panels::fmt::{dim, footer, kv, label};
+use crate::ui::panels::fmt::{dim, kv, label};
 use crate::ui::{is_focused, panel_block, Theme};
 
 /// Width of the value column every telemetry row right-aligns into, so the
@@ -43,16 +43,12 @@ pub fn draw(
     has_elements: bool,
     now: DateTime<Utc>,
 ) {
-    let mut block = panel_block(Panel::Telemetry, "TELEMETRY", is_focused(app, Panel::Telemetry));
-    // Computed once here rather than assumed to be 38: the RANGE row and the
-    // epoch footer both size themselves against the real inner width, so a
-    // narrower panel degrades its text instead of clipping into the border.
+    let block = panel_block(Panel::Telemetry, "TELEMETRY", is_focused(app, Panel::Telemetry));
+    // Computed once here rather than assumed to be 38: the RANGE and TLE rows
+    // both size themselves against the real inner width, so a narrower panel
+    // degrades its trailing text instead of clipping into the border.
     let inner_w = block.inner(area).width as usize;
     let mut rows: Vec<Line> = Vec::new();
-    // The element-set epoch, rendered on the bottom border after the match —
-    // the "can't propagate" arm below has no `Tracker` to read it from, so it
-    // is carried out here rather than pushed as a row.
-    let mut epoch: Option<DateTime<Utc>> = None;
 
     match sat {
         // `sat` is `None` either because no element set has arrived yet, or
@@ -64,7 +60,6 @@ pub fn draw(
         }
         None => rows.push(dim("  waiting for the element set…")),
         Some((tr, s)) => {
-            epoch = Some(tr.epoch());
             rows.push(kv("ALT", format!("{:>VALUE_W$.1} km", s.sub_point.alt_km)));
             rows.push(kv(
                 "SPD",
@@ -123,29 +118,7 @@ pub fn draw(
                 rows.push(range_row(&look_angles(&g, s.ecef_km), inner_w));
             }
 
-            // `element_age` is signed — a backward scrub puts `now` before the
-            // epoch — so the colour keys off the magnitude, and a negative age
-            // reads "ahead" rather than a bare "-3d old".
-            let age = tr.element_age(now);
-            let age_color = if age.abs() > Duration::hours(72) {
-                Theme::ALERT
-            } else if age.abs() > Duration::hours(36) {
-                Theme::CAUTION
-            } else {
-                Theme::LABEL
-            };
-            let (age_num, age_rel) = if age < Duration::zero() {
-                (fmt_dur_coarse(-age), "ahead")
-            } else {
-                (fmt_dur_coarse(age), "old")
-            };
-            rows.push(Line::from(vec![
-                label("TLE"),
-                Span::styled(
-                    format!("{age_num:>VALUE_W$} {age_rel}"),
-                    Style::new().fg(age_color),
-                ),
-            ]));
+            rows.push(tle_row(tr.element_age(now), tr.epoch(), inner_w));
 
             // What that age costs you: a modelled position error, from the
             // element set's own drag term and its orbital regime (see
@@ -182,20 +155,57 @@ pub fn draw(
         }
     }
 
-    // The exact epoch on the bottom border — the `title_bottom` provenance
-    // pattern SPACE WEATHER and LAUNCHES use, so it costs no body row (this
-    // panel already gives one up at the 80x24 minimum). Only when the border
-    // is wide enough to hold it in full: fixing one clipped string by adding
-    // another would be no fix at all. `footer`'s own `+ 2` is its ` … `
-    // padding.
-    if let Some(e) = epoch {
-        let bit = format!("epoch {}", e.format("%Y-%m-%d %H:%M:%SZ"));
-        if bit.chars().count() + 2 <= inner_w {
-            block = footer(block, vec![bit]);
-        }
-    }
-
     frame.render_widget(Paragraph::new(rows).block(block), area);
+}
+
+/// The TLE row: how far the displayed time is from the element-set epoch, and
+/// the epoch itself, sized to `budget` columns (the panel's inner width) so the
+/// trailing phrase degrades instead of clipping into the right border — the
+/// same reason `range_row` below is width-aware.
+///
+/// `age` is signed: a backward scrub of the clock puts `now` before the epoch,
+/// so the magnitude drives both the colour (amber past 36 h, red past 72 h) and
+/// the number, while the sign only chooses the word — the row reads
+/// "18h before …" rather than a bare "-18h".
+///
+/// The head (label plus the coarse age) is fixed; the tail takes the first form
+/// that fits from a shortest-fit ladder — the two-space set-off with the epoch,
+/// a single space, then a fallback to the old bare "old"/"ahead" wording once
+/// the timestamp no longer fits. The age itself is the last thing to go.
+fn tle_row(age: Duration, epoch: DateTime<Utc>, budget: usize) -> Line<'static> {
+    let color = if age.abs() > Duration::hours(72) {
+        Theme::ALERT
+    } else if age.abs() > Duration::hours(36) {
+        Theme::CAUTION
+    } else {
+        Theme::LABEL
+    };
+    let behind = age >= Duration::zero();
+    let age_num = fmt_dur_coarse(age.abs());
+    let (word, bare) = if behind { ("since", "old") } else { ("before", "ahead") };
+    let ts = epoch.format("%m-%d %H:%MZ");
+
+    let head = vec![
+        label("TLE"),
+        Span::styled(format!("{age_num:>VALUE_W$}"), Style::new().fg(color)),
+    ];
+    // Every glyph in the tail is one column wide (ASCII plus `Z`), so a `char`
+    // count is the display width `Line::width` will measure.
+    let room = budget.saturating_sub(head.iter().map(Span::width).sum::<usize>());
+    let tail = [
+        format!("  {word} {ts}"),
+        format!(" {word} {ts}"),
+        format!("  {bare}"),
+    ]
+    .into_iter()
+    .find(|s| s.chars().count() <= room)
+    .unwrap_or_default();
+
+    let mut spans = head;
+    if !tail.is_empty() {
+        spans.push(Span::styled(tail, Style::new().fg(Theme::LABEL)));
+    }
+    Line::from(spans)
 }
 
 /// The RANGE row, sized to `budget` columns (the panel's inner width) so its
@@ -391,5 +401,56 @@ mod tests {
         let t = line_text(&range_row(&look(-12.0, 7352.0), 30));
         assert!(t.contains("-12°"), "{t:?}");
         assert!(!t.contains("below"), "{t:?}");
+    }
+
+    fn epoch() -> DateTime<Utc> {
+        "2026-09-06T23:11:04Z".parse().unwrap()
+    }
+
+    /// The reported problem: the TLE age row never named the instant it was
+    /// measured from. It now carries the epoch, and — like `range_row` — must
+    /// never exceed the width it is handed, at any age magnitude, sign or
+    /// panel size.
+    #[test]
+    fn tle_row_never_exceeds_the_width_it_is_given() {
+        for budget in 20..=48usize {
+            for mins in [5_i64, 45, 90, 18 * 60, 47 * 60, 5 * 24 * 60] {
+                for age in [Duration::minutes(mins), Duration::minutes(-mins)] {
+                    let w = tle_row(age, epoch(), budget).width();
+                    assert!(w <= budget, "age {age}, budget {budget}: width {w}");
+                }
+            }
+        }
+    }
+
+    /// At the real inner width of the 40-column right column the row names the
+    /// epoch, so a later tightening can't quietly drop the relation in the
+    /// common case.
+    #[test]
+    fn tle_row_names_the_epoch_at_the_real_panel_width() {
+        let t = line_text(&tle_row(Duration::hours(18), epoch(), 38));
+        assert!(t.contains("18h"), "{t:?}");
+        assert!(t.contains("since"), "{t:?}");
+        assert!(t.contains("09-06 23:11Z"), "{t:?}");
+    }
+
+    /// A backward scrub of the clock puts `now` before the epoch: the row reads
+    /// "before" with a positive magnitude, never a bare "-18h".
+    #[test]
+    fn tle_row_reads_before_when_the_clock_is_scrubbed_past_the_epoch() {
+        let t = line_text(&tle_row(Duration::hours(-18), epoch(), 38));
+        assert!(t.contains("18h"), "{t:?}");
+        assert!(t.contains("before"), "{t:?}");
+        assert!(!t.contains("-18h"), "{t:?}");
+    }
+
+    /// Below the width where the timestamp fits, the row degrades to exactly
+    /// the old relative wording rather than to a bare number.
+    #[test]
+    fn tle_row_falls_back_to_the_relative_wording_when_the_epoch_does_not_fit() {
+        let t = line_text(&tle_row(Duration::hours(18), epoch(), 24));
+        assert!(t.contains("18h"), "{t:?}");
+        assert!(t.contains("old"), "{t:?}");
+        assert!(!t.contains("09-06"), "{t:?}");
     }
 }
