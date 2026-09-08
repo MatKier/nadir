@@ -10,9 +10,10 @@ use crate::orbit::solar::{subsolar_point, sun_ecef_unit};
 /// Everything nadir needs about the satellite at one instant.
 #[derive(Debug, Clone)]
 pub struct SatState {
-    /// The instant this state was propagated to. Kept for callers that log or
-    /// extrapolate; the panels read "now" directly.
-    #[allow(dead_code)]
+    /// The instant this state was propagated to. Carried so a caller can test
+    /// the state against a time window without being handed the instant
+    /// separately and risking the two disagreeing — the sky plot's live
+    /// position marker gates on exactly that.
     pub time: DateTime<Utc>,
     /// Sub-satellite point (geodetic latitude/longitude and orbital altitude).
     pub sub_point: GeoPoint,

@@ -235,7 +235,7 @@ impl App {
     fn scroll(&mut self, delta: i32) {
         let max_index = match self.focus {
             Panel::Tracked => self.config.tracked.len().saturating_sub(1),
-            Panel::Passes => self.passes.len().saturating_sub(1),
+            Panel::Passes => self.upcoming_passes(self.sim_now()).len().saturating_sub(1),
             Panel::Launches => self
                 .data
                 .read()
@@ -298,9 +298,41 @@ impl App {
             // nothing.
             return;
         };
-        self.passes = predict_passes(&tr, &station, now, chrono::Duration::hours(96), 24);
+        // Start the scan one revolution *before* `now`. `predict_passes` only
+        // records a pass where it sees the satellite rise, so a pass already
+        // under way — whose rise is behind us — is invisible to a scan that
+        // begins at `now`, and would vanish from the list the instant it
+        // started. One period is a safe look-back: nothing that rises and sets
+        // can stay above the horizon longer than it takes to go round once.
+        // The already-set passes this drags in are *kept* here and filtered
+        // out at render time by `upcoming_passes` — judging that boundary
+        // against the frame's clock rather than the rebuild's is what makes a
+        // pass leave the panel the moment it sets instead of up to 20 s later.
+        let lookback = chrono::Duration::minutes(
+            (tr.orbit_shape().period_min.round() as i64).clamp(0, PASS_LOOKBACK_CAP_MIN),
+        );
+        let window = lookback + chrono::Duration::hours(PASS_HORIZON_H);
+        self.passes = predict_passes(&tr, &station, now - lookback, window, PASS_MAX_RESULTS);
         self.passes_at = Some(Instant::now());
         self.passes_from = Some(now);
+    }
+
+    /// The passes NEXT PASSES actually shows: everything that has not already
+    /// set.
+    ///
+    /// [`Self::passes`] deliberately holds up to one revolution of *ended*
+    /// passes behind `now` — that look-back is what lets a pass under way stay
+    /// listed while it happens (see [`Self::refresh_passes`]). A satellite's
+    /// passes never overlap, so the ended ones are a contiguous prefix and
+    /// this is a subslice rather than a filter.
+    ///
+    /// `now` is a parameter rather than a `sim_now()` call of its own so every
+    /// reader in one frame sees the same list: under a fast warp two
+    /// `sim_now()` calls within a single frame can straddle a LOS, and the
+    /// panel, the scroll clamp and the sky plot would then disagree about
+    /// which pass the highlight is on.
+    pub fn upcoming_passes(&self, now: DateTime<Utc>) -> &[Pass] {
+        &self.passes[self.passes.partition_point(|p| p.los <= now)..]
     }
 
     fn handle_key(&mut self, key: KeyEvent) {
@@ -545,7 +577,7 @@ impl App {
         // pass we just landed on, so a second press must skip it and advance
         // to the following one rather than re-selecting the same pass.
         let target = self
-            .passes
+            .upcoming_passes(now)
             .iter()
             .filter(|p| !visible_only || p.visible)
             .map(|p| p.aos - lead)
@@ -916,6 +948,17 @@ pub(crate) const LAUNCHES_INTERVAL: Duration = Duration::from_secs(30 * 60);
 /// frame. A fast warp is allowed to lag the list by up to this long instead,
 /// invisible next to the 30 s coarse step `predict_passes` already scans at.
 const PASS_REBUILD_FLOOR: Duration = Duration::from_millis(500);
+
+/// How far ahead the pass list reaches, in hours.
+const PASS_HORIZON_H: i64 = 96;
+/// Ceiling on the scan's look-back (see [`App::refresh_passes`]), in minutes.
+/// The look-back is one orbital revolution; this stops a nonsense period from
+/// a malformed element set turning a 96-hour scan into a multi-day one.
+const PASS_LOOKBACK_CAP_MIN: i64 = 24 * 60;
+/// How many passes one rebuild keeps. Two more than the forward window alone
+/// would need, because the look-back drags in the pass under way and possibly
+/// one that has just set, and those must not eat into the 96 hours ahead.
+const PASS_MAX_RESULTS: usize = 26;
 
 /// One network-backed dashboard field, tied together in one place: which
 /// `AppData` slot it publishes into, which cache key it persists under, and
@@ -1459,23 +1502,23 @@ mod tests {
 
         // Any other focus: no highlight is showing, so nothing to plot.
         app.focus = Panel::Map;
-        assert!(crate::ui::selected_pass(&app).is_none());
+        assert!(crate::ui::selected_pass(&app, now).is_none());
 
         // NEXT PASSES focused, second row highlighted: that pass, with its
         // index and the list length.
         app.focus = Panel::Passes;
         app.list_pos = 1;
-        let (i, total, pass) = crate::ui::selected_pass(&app).expect("a pass while focused");
-        assert_eq!((i, total), (1, 2));
-        assert!(pass.visible);
+        let h = crate::ui::selected_pass(&app, now).expect("a pass while focused");
+        assert_eq!((h.index, h.total), (1, 2));
+        assert!(h.pass.visible);
 
         // A stale list_pos past the end clamps to the last row, never panics.
         app.list_pos = 99;
-        assert_eq!(crate::ui::selected_pass(&app).unwrap().0, 1);
+        assert_eq!(crate::ui::selected_pass(&app, now).unwrap().index, 1);
 
         // No passes: nothing to plot, even focused.
         app.passes.clear();
-        assert!(crate::ui::selected_pass(&app).is_none());
+        assert!(crate::ui::selected_pass(&app, now).is_none());
     }
 
     // --- time scrubbing ---------------------------------------------------
@@ -1633,6 +1676,56 @@ mod tests {
         let second = app.passes_from.expect("and rebuilt after the jump");
 
         assert!(second - first > chrono::Duration::hours(11), "the window moved with the clock");
+    }
+
+    #[test]
+    fn a_pass_already_under_way_stays_in_the_list() {
+        let mut config = Config::default();
+        config.set_location(48.0, 11.0, None);
+        let mut app = test_app(config);
+        if let Ok(mut d) = app.data.write() {
+            d.tle.set_live(crate::orbit::test_tracker());
+        }
+        app.refresh_passes();
+        let first = app.passes.first().expect("the fixture yields passes").clone();
+
+        // Scrub into the middle of it and rebuild. Before the look-back, the
+        // fresh scan started at `now` and could not see a rise already behind
+        // it, so the pass vanished the moment it began.
+        let midpoint = first.aos + (first.los - first.aos) / 2;
+        app.clock.goto(midpoint);
+        app.invalidate_passes();
+        app.refresh_passes();
+
+        let under_way = app
+            .upcoming_passes(midpoint)
+            .iter()
+            .find(|p| p.aos <= midpoint && p.los > midpoint)
+            .expect("the pass under way is still listed");
+        assert!((under_way.aos - first.aos).abs() < chrono::Duration::seconds(2));
+        assert_eq!(
+            app.upcoming_passes(midpoint).first().map(|p| p.aos),
+            Some(under_way.aos),
+            "and it heads the list, being the earliest that has not set",
+        );
+    }
+
+    #[test]
+    fn next_passes_stops_showing_a_pass_once_it_has_set() {
+        let mut app = test_app(Config::default());
+        let now = Utc::now();
+        app.passes = vec![dummy_pass(now, false), dummy_pass(now + chrono::Duration::hours(2), true)];
+        let first_los = app.passes[0].los;
+
+        assert_eq!(app.upcoming_passes(first_los - chrono::Duration::seconds(1)).len(), 2);
+        // The instant it sets it leaves the panel — judged against the frame's
+        // clock, not against whenever the list was last rebuilt.
+        assert_eq!(app.upcoming_passes(first_los + chrono::Duration::seconds(1)).len(), 1);
+        assert_eq!(
+            app.upcoming_passes(now + chrono::Duration::days(1)).len(),
+            0,
+            "and a list entirely behind the clock shows nothing at all",
+        );
     }
 
     #[test]

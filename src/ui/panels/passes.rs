@@ -41,7 +41,13 @@ pub fn draw(
     let title = passes_title(app, area.width);
     let block = panel_block(Panel::Passes, &title, focused);
 
-    if app.passes.is_empty() {
+    // `app.passes` keeps a look-back of already-set passes so a pass under way
+    // survives a rebuild; `upcoming_passes` is what belongs on screen, and
+    // judging it against this frame's `now` is what drops a pass the moment it
+    // sets rather than at the next rebuild.
+    let passes = app.upcoming_passes(now);
+
+    if passes.is_empty() {
         frame.render_widget(
             Paragraph::new(dim("  no passes above 10° in the next 96 h"))
                 .block(block)
@@ -51,13 +57,16 @@ pub fn draw(
         return;
     }
 
-    let items: Vec<ListItem> = app
-        .passes
+    let items: Vec<ListItem> = passes
         .iter()
         .map(|p| {
             let aos = p.aos.with_timezone(&Local);
             let los = p.los.with_timezone(&Local);
-            let soon = p.aos - now < Duration::hours(1) && p.aos > now;
+            // "Within the hour" includes "happening right now": a pass under
+            // way is the most urgent row on screen and must not read as the
+            // dimmest. No `p.aos > now` guard is needed to keep an already-set
+            // pass out of this — `upcoming_passes` has none to give.
+            let soon = p.aos - now < Duration::hours(1);
             let day = aos.format("%a").to_string();
 
             let mut style = Style::new().fg(Theme::VALUE);
@@ -90,7 +99,7 @@ pub fn draw(
     // element set is good to a fraction of a second and gets no footer at all.
     // Because a footer needs the block's *inner* area, the block is drawn on
     // its own here rather than handed to the `List`.
-    let footer = pass_accuracy_footer(sat, &app.passes);
+    let footer = pass_accuracy_footer(sat, passes);
     let inner = block.inner(area);
     frame.render_widget(block, area);
     let (list_area, footer_area) = match footer {
@@ -102,7 +111,7 @@ pub fn draw(
         None => (inner, None),
     };
 
-    let selected = focused.then(|| app.list_pos.min(app.passes.len().saturating_sub(1)));
+    let selected = focused.then(|| app.list_pos.min(passes.len().saturating_sub(1)));
     let list = List::new(items)
         .highlight_style(row_highlight())
         .highlight_symbol("▶ ");
