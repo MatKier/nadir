@@ -10,7 +10,7 @@ mod skyplot;
 /// saturate against it without `mod map` being made public.
 pub(crate) use map::MAX_ZOOM;
 
-use chrono::{Duration as ChronoDuration, Utc};
+use chrono::{DateTime, Duration as ChronoDuration, Utc};
 use ratatui::layout::{Alignment, Constraint, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
@@ -137,9 +137,9 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
         // over here draws something over there" idiom the pad marker uses,
         // and it needs the element set the plot samples from. Any other focus,
         // or no element set yet, falls through to the map.
-        match (selected_pass(app), sat_state.as_ref()) {
-            (Some((i, total, pass)), Some((tracker, _))) => {
-                skyplot::draw(frame, map_area, app, pass, i, total, tracker);
+        match (selected_pass(app, now), sat_state.as_ref()) {
+            (Some(highlight), Some((tracker, state))) => {
+                skyplot::draw(frame, map_area, app, &highlight, tracker, state);
             }
             _ => map::draw(frame, map_area, app, sat_state.as_ref(), now, pad),
         }
@@ -523,19 +523,29 @@ fn selected_launch_pad<'a>(
     })
 }
 
-/// The pass highlighted in NEXT PASSES, as `(row index, list length, pass)` —
-/// `None` unless that panel holds focus, since the row highlight is only
-/// visible then, so the sky plot and the highlight appear and vanish together
-/// (the same focus gate [`selected_launch_pad`] applies to the pad marker).
-/// The `.min` clamp mirrors the one `panels::passes` puts on the same list, so
-/// the plot can never show a different pass than the highlighted row.
-pub(crate) fn selected_pass(app: &App) -> Option<(usize, usize, &Pass)> {
-    if app.focus != Panel::Passes || app.passes.is_empty() {
+/// The pass highlighted in NEXT PASSES and where it sits in the list — what
+/// the sky plot needs both to draw it and to title itself `pass 2 of 7`.
+pub(crate) struct Highlight<'a> {
+    pub pass: &'a Pass,
+    /// Row index within [`App::upcoming_passes`], and that list's length.
+    pub index: usize,
+    pub total: usize,
+}
+
+/// The highlighted pass, or `None` unless NEXT PASSES holds focus — the row
+/// highlight is only visible then, so the sky plot and the highlight appear
+/// and vanish together (the same focus gate [`selected_launch_pad`] applies to
+/// the pad marker). Indexes [`App::upcoming_passes`], the one definition of
+/// what the panel shows, and applies the same `.min` clamp `panels::passes`
+/// does, so the plot can never show a different pass than the highlighted row.
+pub(crate) fn selected_pass(app: &App, now: DateTime<Utc>) -> Option<Highlight<'_>> {
+    let passes = app.upcoming_passes(now);
+    if app.focus != Panel::Passes || passes.is_empty() {
         return None;
     }
-    let total = app.passes.len();
-    let i = app.list_pos.min(total - 1);
-    Some((i, total, &app.passes[i]))
+    let total = passes.len();
+    let index = app.list_pos.min(total - 1);
+    Some(Highlight { pass: &passes[index], index, total })
 }
 
 fn sat_input_popup(frame: &mut Frame, area: Rect, picker: &crate::app::SatPicker, search: &SearchState) {

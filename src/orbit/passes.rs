@@ -127,7 +127,7 @@ pub fn predict_passes(
 
         // Rising edge through the horizon: a pass has begun.
         if prev_el < 0.0 && el >= 0.0 {
-            let aos = bisect_crossing(tracker, station, t, next);
+            let aos = bisect_crossing(tracker, station, t, next, true);
 
             // Walk forward to the setting edge.
             let mut a = next;
@@ -146,7 +146,7 @@ pub fn predict_passes(
                 ea = eb;
             }
             let los = if set_to > set_from {
-                bisect_crossing(tracker, station, set_from, set_to)
+                bisect_crossing(tracker, station, set_from, set_to, false)
             } else {
                 a // pass runs past the horizon window; clamp
             };
@@ -190,19 +190,32 @@ fn azimuth_at(tracker: &Tracker, station: &GeoPoint, t: DateTime<Utc>) -> f64 {
         .unwrap_or(0.0)
 }
 
-/// Bisect the horizon crossing between `lo` (below) and `hi` (above), to ~1 s.
+/// Bisect the horizon crossing bracketed by `lo` and `hi`, to ~1 s. `rising`
+/// says which way the elevation passes through zero: at AOS the satellite is
+/// below the horizon at `lo` and above it at `hi`, at LOS the other way round.
+///
+/// It has to be told, rather than inferring from the endpoints, because each
+/// step keeps whichever half still contains the crossing — and that is the
+/// *opposite* half in the two cases. Bisecting a set as though it were a rise
+/// throws the crossing away on the first iteration and then walks to an end of
+/// the bracket, which is exactly what used to leave LOS (and so every pass
+/// duration, and the arc's end on the sky plot) wrong by up to the caller's
+/// 30 s coarse step, in whichever direction the coarse grid happened to fall.
 fn bisect_crossing(
     tracker: &Tracker,
     station: &GeoPoint,
     mut lo: DateTime<Utc>,
     mut hi: DateTime<Utc>,
+    rising: bool,
 ) -> DateTime<Utc> {
     for _ in 0..24 {
         if (hi - lo) <= Duration::seconds(1) {
             break;
         }
         let mid = lo + (hi - lo) / 2;
-        if elevation_at(tracker, station, mid) >= 0.0 {
+        // On a rise, `mid` already above the horizon puts the crossing behind
+        // it; on a set, above puts the crossing still ahead of it.
+        if (elevation_at(tracker, station, mid) >= 0.0) == rising {
             hi = mid;
         } else {
             lo = mid;
@@ -284,6 +297,63 @@ mod tests {
         }
     }
 
+    /// The premise `App::refresh_passes`'s look-back rests on: a scan only
+    /// records a pass where it sees the satellite *rise*, so a pass already
+    /// under way at the scan start is invisible — and starting the scan before
+    /// that rise is what brings it back.
+    #[test]
+    fn a_scan_starting_mid_pass_misses_it_but_one_starting_before_the_rise_does_not() {
+        let tr = test_tracker();
+        let munich = GeoPoint::new(48.137, 11.575, 0.52);
+        let passes = predict_passes(&tr, &munich, tr.epoch(), Duration::hours(48), 20);
+        let pass = passes.first().expect("at least one ISS pass in 48 h").clone();
+
+        // Scanning from inside the pass: its rise is behind us, so it's gone.
+        let midpoint = pass.aos + (pass.los - pass.aos) / 2;
+        let from_mid = predict_passes(&tr, &munich, midpoint, Duration::hours(48), 20);
+        assert!(
+            from_mid.iter().all(|p| p.aos > midpoint),
+            "a scan from mid-pass cannot see the pass it is inside",
+        );
+
+        // Backing the start up past the rise finds it again, unchanged.
+        let lookback = Duration::minutes(tr.orbit_shape().period_min.round() as i64);
+        let from_before = predict_passes(&tr, &munich, midpoint - lookback, Duration::hours(48), 20);
+        let found = from_before
+            .iter()
+            .find(|p| p.aos <= midpoint && p.los > midpoint)
+            .expect("one revolution of look-back catches the pass under way");
+        assert!(
+            (found.aos - pass.aos).abs() < Duration::seconds(2),
+            "the same rise, bisected to the same instant",
+        );
+        assert!(
+            (found.los - pass.los).abs() < Duration::seconds(2),
+            "and the same set — a LOS that moved with the coarse grid's phase \
+             would mean `bisect_crossing` is not tracking the setting edge",
+        );
+    }
+
+    /// Both ends of a pass are horizon crossings, so a correctly bisected AOS
+    /// and LOS both land *on* 0° elevation. LOS used to be bisected with the
+    /// polarity of a rise, which walked it to an end of the 30 s coarse step
+    /// instead — leaving it a degree or two off the horizon, and up to half a
+    /// minute out in time, in whichever direction the grid happened to fall.
+    #[test]
+    fn both_ends_of_a_pass_are_bisected_onto_the_horizon() {
+        let tr = test_tracker();
+        let munich = GeoPoint::new(48.137, 11.575, 0.52);
+        let passes = predict_passes(&tr, &munich, tr.epoch(), Duration::hours(48), 20);
+        assert!(!passes.is_empty(), "the fixture must yield passes to check");
+
+        for p in &passes {
+            let aos_el = elevation_at(&tr, &munich, p.aos);
+            let los_el = elevation_at(&tr, &munich, p.los);
+            assert!(aos_el.abs() < 0.5, "AOS sits at {aos_el:.3}°, not on the horizon");
+            assert!(los_el.abs() < 0.5, "LOS sits at {los_el:.3}°, not on the horizon");
+        }
+    }
+
     #[test]
     fn a_sampled_pass_starts_and_ends_near_the_horizon_and_peaks_between_them() {
         let tr = test_tracker();
@@ -297,8 +367,8 @@ mod tests {
         // The endpoints are the AOS/LOS horizon crossings, so they sit within
         // a fraction of a degree of 0°; the interior rises to the pass's
         // recorded peak elevation.
-        assert!(arc.first().unwrap().elevation_deg.abs() < 2.0);
-        assert!(arc.last().unwrap().elevation_deg.abs() < 2.0);
+        assert!(arc.first().unwrap().elevation_deg.abs() < 1.0);
+        assert!(arc.last().unwrap().elevation_deg.abs() < 1.0);
         let apex = arc.iter().map(|s| s.elevation_deg).fold(f64::MIN, f64::max);
         assert!(
             (apex - pass.peak_elevation_deg).abs() < 1.5,

@@ -181,7 +181,10 @@ fn content(app: &App) -> Vec<Line<'static>> {
     text(&mut l, "at the centre, the horizon at the rim, north up, and elevation rings");
     text(&mut l, "at 30° and 60°.");
     row(&mut l, "▲ / ▼", "the pass rising (AOS) and setting (LOS), on the horizon rim");
-    row(&mut l, "◆", "culmination, labelled with its peak elevation");
+    row(&mut l, "◇", "culmination, labelled with its peak elevation");
+    row(&mut l, "◆", "the satellite itself — only while the pass is under way");
+    text(&mut l, "     Same filled diamond the map uses, and it moves with the clock: warp");
+    text(&mut l, "     or step the time and watch it climb the arc from ▲ past ◇ out to ▼.");
     row(&mut l, "bright arc", "the satellite is sunlit along this stretch of the pass");
     row(&mut l, "dim arc", "it is in the Earth's shadow here");
     text(&mut l, "The plot's footer gives the AOS / culmination / LOS times, their");
