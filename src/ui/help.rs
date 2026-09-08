@@ -126,6 +126,8 @@ fn content(app: &App) -> Vec<Line<'static>> {
     text(&mut l, "`p` labels prominent cities and ground stations, drawing as many as");
     text(&mut l, "fit without overlapping — so a whole-world map shows only a scattered");
     text(&mut l, "few and more fill in the further `+` zooms in, or `m` widens the map.");
+    text(&mut l, "While NEXT PASSES holds focus this pane shows a sky plot of the");
+    text(&mut l, "highlighted pass instead — see below.");
     blank(&mut l);
 
     heading(&mut l, "Tracked");
@@ -174,6 +176,16 @@ fn content(app: &App) -> Vec<Line<'static>> {
     text(&mut l, "bounding how far the AOS/LOS times on screen could slip.");
     text(&mut l, "The panel title names your ground station and its UTC offset — the");
     text(&mut l, "same offset the AOS–LOS times above are shown in.");
+    text(&mut l, "Focus this panel (`4`) and scroll (`j`/`k`) to highlight a pass — the");
+    text(&mut l, "map pane then shows a sky plot of it: a polar chart with the zenith");
+    text(&mut l, "at the centre, the horizon at the rim, north up, and elevation rings");
+    text(&mut l, "at 30° and 60°.");
+    row(&mut l, "▲ / ▼", "the pass rising (AOS) and setting (LOS), on the horizon rim");
+    row(&mut l, "◆", "culmination, labelled with its peak elevation");
+    row(&mut l, "bright arc", "the satellite is sunlit along this stretch of the pass");
+    row(&mut l, "dim arc", "it is in the Earth's shadow here");
+    text(&mut l, "The plot's footer gives the AOS / culmination / LOS times, their");
+    text(&mut l, "bearings and the pass length; it clears when focus leaves the panel.");
     blank(&mut l);
 
     heading(&mut l, "Space weather");

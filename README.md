@@ -150,6 +150,10 @@ and pressing `r` forces a fresh Kp/aurora pull without spending one of the launc
 feed's limited requests. Highlighting a launch expands its row to a second line
 with provider and pad, and marks the pad on the map with `◉` plus the provider,
 vehicle name, site and coordinates, for as long as the row stays highlighted.
+Highlighting a pass, likewise, turns the map pane into a sky plot of it — a
+polar azimuth/elevation chart, zenith at the centre and horizon at the rim,
+with the arc bright while the satellite is sunlit and dim while it is in the
+Earth's shadow — for as long as Passes keeps focus.
 
 The clock keys detach the display from wall time so you can watch a pass play
 out, step to where the satellite will be, or run the ground track backwards.
@@ -201,7 +205,10 @@ the whole world. `◆` sub-satellite point · `▲` ground station · `◉` pad 
 launch currently highlighted in Launches, with its provider, site and
 coordinates. `p` toggles a layer of labelled reference points — `·` cities and
 `+` satellite ground stations — drawn as many as fit without overlapping, so a
-whole-world map shows only a scattered few and more fill in as you zoom.
+whole-world map shows only a scattered few and more fill in as you zoom. While
+the Passes panel has focus this pane shows a sky plot of the highlighted pass
+instead — `▲`/`▼` its rise and set on the horizon rim, `◆` its culmination,
+the arc bright where the satellite is sunlit and dim where it is eclipsed.
 
 **Space weather** (NOAA SWPC) — `Kp` planetary K-index, 0–9 · `WIND` solar wind
 speed · `Bz` north–south interplanetary field (strongly negative drives aurora) ·

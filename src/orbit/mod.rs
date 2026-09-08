@@ -7,7 +7,7 @@ pub mod propagate;
 pub mod solar;
 
 pub use accuracy::{Accuracy, Confidence};
-pub use passes::{predict_passes, Pass};
+pub use passes::{predict_passes, sample_pass, sky_sample, Pass, SkySample};
 pub use propagate::{OrbitClass, OrbitPlane, OrbitShape, SatState, Tracker};
 
 /// A real ISS element set fetched from Celestrak, shared by every test in this
