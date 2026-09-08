@@ -4,6 +4,7 @@ mod help;
 mod map;
 mod panels;
 mod places;
+mod skyplot;
 
 /// The tightest follow-mode zoom index, re-exported so `App::zoom_in` can
 /// saturate against it without `mod map` being made public.
@@ -17,6 +18,7 @@ use ratatui::widgets::{Block, Clear, Paragraph, Wrap};
 use ratatui::Frame;
 
 use crate::app::{App, Panel, SearchState};
+use crate::orbit::Pass;
 use crate::source::Health;
 
 /// Palette — a calm mission-control console: cyan structure, green nominal,
@@ -130,7 +132,17 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
             Layout::horizontal([Constraint::Length(40), Constraint::Min(0)]).areas(bottom);
 
         title_bar(frame, title, app, &data);
-        map::draw(frame, map_area, app, sat_state.as_ref(), now, pad);
+        // While NEXT PASSES holds focus the map pane shows a sky plot of the
+        // highlighted pass instead of the world map — the same "a highlight
+        // over here draws something over there" idiom the pad marker uses,
+        // and it needs the element set the plot samples from. Any other focus,
+        // or no element set yet, falls through to the map.
+        match (selected_pass(app), sat_state.as_ref()) {
+            (Some((i, total, pass)), Some((tracker, _))) => {
+                skyplot::draw(frame, map_area, app, pass, i, total, tracker);
+            }
+            _ => map::draw(frame, map_area, app, sat_state.as_ref(), now, pad),
+        }
         panels::tracked::draw(frame, tracked, app);
         panels::telemetry::draw(frame, telem, app, sat_state.as_ref(), data.tle.get().is_some(), now);
         panels::passes::draw(frame, passes, app, sat_state.as_ref(), now);
@@ -430,7 +442,8 @@ fn key_hints(focus: Panel) -> Vec<String> {
 
 /// The first of `tiers` that fits in `width` columns, leaving room for the
 /// trailing space the caller pads with. `None` when even the last one doesn't.
-fn fitting_hint(tiers: &[String], width: u16) -> Option<&str> {
+/// Shared with the sky plot's footer, which is the same widest-that-fits pick.
+pub(in crate::ui) fn fitting_hint(tiers: &[String], width: u16) -> Option<&str> {
     tiers
         .iter()
         .find(|keys| width as usize > keys.chars().count() + 1)
@@ -508,6 +521,21 @@ fn selected_launch_pad<'a>(
         lat: l.pad_lat?,
         lon: l.pad_lon?,
     })
+}
+
+/// The pass highlighted in NEXT PASSES, as `(row index, list length, pass)` —
+/// `None` unless that panel holds focus, since the row highlight is only
+/// visible then, so the sky plot and the highlight appear and vanish together
+/// (the same focus gate [`selected_launch_pad`] applies to the pad marker).
+/// The `.min` clamp mirrors the one `panels::passes` puts on the same list, so
+/// the plot can never show a different pass than the highlighted row.
+pub(crate) fn selected_pass(app: &App) -> Option<(usize, usize, &Pass)> {
+    if app.focus != Panel::Passes || app.passes.is_empty() {
+        return None;
+    }
+    let total = app.passes.len();
+    let i = app.list_pos.min(total - 1);
+    Some((i, total, &app.passes[i]))
 }
 
 fn sat_input_popup(frame: &mut Frame, area: Rect, picker: &crate::app::SatPicker, search: &SearchState) {

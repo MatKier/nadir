@@ -10,7 +10,7 @@ use ratatui::Frame;
 
 use crate::app::{App, Panel};
 use crate::orbit::{Confidence, Pass, SatState, Tracker};
-use crate::ui::panels::fmt::{dim, row_highlight, station_label};
+use crate::ui::panels::fmt::{compass, dim, row_highlight, station_label};
 use crate::ui::{is_focused, panel_block, Theme};
 
 pub fn draw(
@@ -193,14 +193,6 @@ fn utc_offset_label(offset: &FixedOffset) -> String {
     let sign = if secs < 0 { '-' } else { '+' };
     let secs = secs.unsigned_abs();
     format!("UTC{sign}{:02}:{:02}", secs / 3600, (secs % 3600) / 60)
-}
-
-fn compass(deg: f64) -> &'static str {
-    const P: [&str; 16] = [
-        "N", "NNE", "NE", "ENE", "E", "ESE", "SE", "SSE", "S", "SSW", "SW", "WSW", "W", "WNW", "NW",
-        "NNW",
-    ];
-    P[(((deg % 360.0) / 22.5).round() as usize) % 16]
 }
 
 #[cfg(test)]

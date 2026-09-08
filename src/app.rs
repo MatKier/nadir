@@ -1450,6 +1450,34 @@ mod tests {
         assert!(!app.places);
     }
 
+    #[test]
+    fn the_sky_plot_follows_the_highlighted_pass_only_while_next_passes_is_focused() {
+        let mut app = test_app(Config::default());
+        let now = Utc::now();
+        app.passes =
+            vec![dummy_pass(now, false), dummy_pass(now + chrono::Duration::hours(2), true)];
+
+        // Any other focus: no highlight is showing, so nothing to plot.
+        app.focus = Panel::Map;
+        assert!(crate::ui::selected_pass(&app).is_none());
+
+        // NEXT PASSES focused, second row highlighted: that pass, with its
+        // index and the list length.
+        app.focus = Panel::Passes;
+        app.list_pos = 1;
+        let (i, total, pass) = crate::ui::selected_pass(&app).expect("a pass while focused");
+        assert_eq!((i, total), (1, 2));
+        assert!(pass.visible);
+
+        // A stale list_pos past the end clamps to the last row, never panics.
+        app.list_pos = 99;
+        assert_eq!(crate::ui::selected_pass(&app).unwrap().0, 1);
+
+        // No passes: nothing to plot, even focused.
+        app.passes.clear();
+        assert!(crate::ui::selected_pass(&app).is_none());
+    }
+
     // --- time scrubbing ---------------------------------------------------
 
     fn dummy_pass(aos: DateTime<Utc>, visible: bool) -> Pass {

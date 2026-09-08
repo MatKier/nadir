@@ -68,6 +68,17 @@ pub(in crate::ui) fn station_label(full: &str, budget: usize) -> Option<String> 
     Some(truncate(first, budget))
 }
 
+/// The 16-point compass name nearest `deg` (degrees clockwise from north):
+/// `"N"`, `"NNE"`, `"ENE"`, … Shared by the NEXT PASSES rows and the sky
+/// plot's AOS/LOS bearings.
+pub(in crate::ui) fn compass(deg: f64) -> &'static str {
+    const P: [&str; 16] = [
+        "N", "NNE", "NE", "ENE", "E", "ESE", "SE", "SSE", "S", "SSW", "SW", "WSW", "W", "WNW", "NW",
+        "NNW",
+    ];
+    P[(((deg % 360.0) / 22.5).round() as usize) % 16]
+}
+
 pub(in crate::ui) fn truncate(s: &str, max: usize) -> String {
     if s.chars().count() <= max {
         s.to_string()

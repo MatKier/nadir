@@ -8,4 +8,4 @@ pub(in crate::ui) mod telemetry;
 pub(in crate::ui) mod tracked;
 pub(in crate::ui) mod weather;
 
-pub(in crate::ui) use fmt::{row_highlight, station_label, truncate};
+pub(in crate::ui) use fmt::{compass, row_highlight, station_label, truncate};
