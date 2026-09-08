@@ -22,11 +22,11 @@ use chrono::{DateTime, Duration as ChronoDuration, NaiveDate, NaiveDateTime, Nai
 /// lands on −1× (reverse at real speed) and then keeps going into fast reverse,
 /// mirroring how `App::zoom_out` steps off the widest follow level straight out
 /// to the whole world.
-const RATE_LADDER: [i64; 14] =
-    [-1800, -300, -60, -10, -5, -2, -1, 1, 2, 5, 10, 60, 300, 1800];
+const RATE_LADDER: [i64; 16] =
+    [-1800, -900, -300, -60, -10, -5, -2, -1, 1, 2, 5, 10, 60, 300, 900, 1800];
 
 /// Index of the `1` in [`RATE_LADDER`] — the live, real-time rate.
-const LIVE_INDEX: usize = 7;
+const LIVE_INDEX: usize = 8;
 
 /// How the clock is moving right now, for the title-bar marker.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -321,6 +321,20 @@ mod tests {
             c.now_from(wall() + ChronoDuration::seconds(10)),
             wall() - ChronoDuration::seconds(20)
         );
+    }
+
+    #[test]
+    fn live_index_points_at_the_one_times_entry() {
+        assert_eq!(RATE_LADDER[LIVE_INDEX], 1);
+    }
+
+    /// The ladder is meant to read the same in both directions — every
+    /// forward multiplier has its negative at the mirrored position.
+    #[test]
+    fn the_rate_ladder_is_symmetric_about_live() {
+        for (i, &r) in RATE_LADDER.iter().enumerate() {
+            assert_eq!(r, -RATE_LADDER[RATE_LADDER.len() - 1 - i], "index {i}");
+        }
     }
 
     #[test]

@@ -84,7 +84,7 @@ fn content(app: &App) -> Vec<Line<'static>> {
     text(&mut l, "instead of now. Feed ages, the status chips and \"up\" never scrub, and");
     text(&mut l, "neither does the launch countdown.");
     row(&mut l, "Space", "pause / resume the clock");
-    row(&mut l, ", / .", "step the speed down / up — 1× 2× 5× 10× 60× 300× 1800×,");
+    row(&mut l, ", / .", "step the speed down / up — 1× 2× 5× 10× 60× 300× 900× 1800×,");
     text(&mut l, "     and past 1× straight into reverse (< / > do the same)");
     row(&mut l, "← / →", "step the clock back / forward one minute (h / l too)");
     row(&mut l, "[ / ]", "step the clock back / forward one hour");
