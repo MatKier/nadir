@@ -26,6 +26,25 @@ pub(crate) fn test_tracker() -> Tracker {
     Tracker::from_gp_json(ISS_GP_JSON).expect("fixture parses")
 }
 
+/// The ground station every pass test observes from: Munich, at roof height.
+/// Paired with [`test_tracker`] it yields a handful of ISS passes in any
+/// two-day window — see [`test_passes`].
+#[cfg(test)]
+pub(crate) fn test_station() -> crate::geo::GeoPoint {
+    crate::geo::GeoPoint::new(48.137, 11.575, 0.52)
+}
+
+/// The ISS passes over [`test_station`] in the 48 hours from the element-set
+/// epoch — the shared starting point for tests that just need a well-formed
+/// pass or two. Tests that vary the scan window (a look-back, a mid-pass
+/// start) still call [`predict_passes`] directly with [`test_tracker`] and
+/// [`test_station`].
+#[cfg(test)]
+pub(crate) fn test_passes() -> Vec<Pass> {
+    let tracker = test_tracker();
+    predict_passes(&tracker, &test_station(), tracker.epoch(), chrono::Duration::hours(48), 20)
+}
+
 /// A real Sentinel-2A element set (NORAD 40697): a textbook sun-synchronous
 /// orbit, used to test SSO detection end-to-end from real inclination/altitude
 /// numbers rather than the hand-picked values `classify`'s own unit tests use.

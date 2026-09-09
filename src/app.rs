@@ -1711,6 +1711,41 @@ mod tests {
     }
 
     #[test]
+    fn the_pass_cap_is_not_what_ends_a_ninety_six_hour_scan() {
+        // `PASS_MAX_RESULTS` is meant to be a backstop, not the thing that
+        // bounds the list: the 96-hour forward window is supposed to run out
+        // first, with the cap only covering that plus the pass or two the
+        // look-back drags in. If a mid-latitude site ever produced more than
+        // `PASS_MAX_RESULTS` real passes in 96 h the list would silently stop
+        // short of the horizon, and `upcoming_passes` would show less than the
+        // advertised outlook.
+        let tr = crate::orbit::test_tracker();
+        let station = crate::orbit::test_station();
+        let window = chrono::Duration::hours(PASS_HORIZON_H);
+
+        let capped = predict_passes(&tr, &station, tr.epoch(), window, PASS_MAX_RESULTS);
+        let uncapped = predict_passes(&tr, &station, tr.epoch(), window, 10_000);
+
+        assert_eq!(
+            capped.len(),
+            uncapped.len(),
+            "the cap truncated the scan — raise PASS_MAX_RESULTS above {}",
+            uncapped.len(),
+        );
+        assert!(
+            capped.len() < PASS_MAX_RESULTS,
+            "no headroom left: {} passes against a cap of {PASS_MAX_RESULTS}",
+            capped.len(),
+        );
+        let last_aos = capped.last().expect("the fixture yields passes").aos;
+        assert!(
+            tr.epoch() + window - last_aos < chrono::Duration::hours(2),
+            "the last pass rises well before the horizon, so something other \
+             than the window is ending the scan",
+        );
+    }
+
+    #[test]
     fn next_passes_stops_showing_a_pass_once_it_has_set() {
         let mut app = test_app(Config::default());
         let now = Utc::now();

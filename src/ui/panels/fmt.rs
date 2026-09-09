@@ -3,11 +3,26 @@
 //! style every scrollable list shares, and the provenance footer weather and
 //! launches both hang off `title_bottom`.
 
+use chrono::{DateTime, Local, Utc};
+use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::Block;
 
 use crate::ui::Theme;
+
+/// `t` as a local wall-clock `HH:MM`. The panels show pass times in the
+/// observer's own timezone; this is the one place the `Utc → Local → strftime`
+/// dance is spelled out.
+pub(in crate::ui) fn local_hm(t: DateTime<Utc>) -> String {
+    t.with_timezone(&Local).format("%H:%M").to_string()
+}
+
+/// [`local_hm`] to the second — `HH:MM:SS` — for the widest footer tier, where
+/// a pass's few minutes are worth pinning down exactly.
+pub(in crate::ui) fn local_hms(t: DateTime<Utc>) -> String {
+    t.with_timezone(&Local).format("%H:%M:%S").to_string()
+}
 
 pub(super) fn label(text: &str) -> Span<'static> {
     Span::styled(format!("  {text:<6}"), Style::new().fg(Theme::LABEL))
@@ -69,14 +84,32 @@ pub(in crate::ui) fn station_label(full: &str, budget: usize) -> Option<String> 
 }
 
 /// The 16-point compass name nearest `deg` (degrees clockwise from north):
-/// `"N"`, `"NNE"`, `"ENE"`, … Shared by the NEXT PASSES rows and the sky
-/// plot's AOS/LOS bearings.
+/// `"N"`, `"NNE"`, `"NE"`, … Shared by the NEXT PASSES rows and the sky
+/// plot's AOS/LOS bearings. `deg` may be any real bearing — `rem_euclid` folds
+/// it into `[0, 360)` first, so a negative one names a real point rather than
+/// saturating to `"N"` the way a signed `%` and an `as usize` cast would.
 pub(in crate::ui) fn compass(deg: f64) -> &'static str {
     const P: [&str; 16] = [
         "N", "NNE", "NE", "ENE", "E", "ESE", "SE", "SSE", "S", "SSW", "SW", "WSW", "W", "WNW", "NW",
         "NNW",
     ];
-    P[(((deg % 360.0) / 22.5).round() as usize) % 16]
+    P[((deg.rem_euclid(360.0) / 22.5).round() as usize) % 16]
+}
+
+/// Split a panel's inner rect into a body and a one-row footer along its
+/// bottom edge, or return the whole rect and `None` when `want_footer` is
+/// false. The caller draws the block itself *before* calling this, so it's the
+/// block's inner rect being split — a `Block` can't carry a body widget and a
+/// separate footer line at the same time. Used by NEXT PASSES (footer only
+/// when the pass times carry a stated error) and the sky plot (footer only
+/// when the pane is tall enough to spare the row).
+pub(in crate::ui) fn split_footer(inner: Rect, want_footer: bool) -> (Rect, Option<Rect>) {
+    if !want_footer {
+        return (inner, None);
+    }
+    let [body, footer] =
+        Layout::vertical([Constraint::Min(1), Constraint::Length(1)]).areas(inner);
+    (body, Some(footer))
 }
 
 pub(in crate::ui) fn truncate(s: &str, max: usize) -> String {
@@ -115,5 +148,28 @@ mod tests {
     fn station_label_gives_up_below_a_two_char_budget() {
         assert_eq!(station_label("Munich, Bavaria, Germany", 1), None);
         assert_eq!(station_label("Munich, Bavaria, Germany", 0), None);
+    }
+
+    #[test]
+    fn compass_names_the_sixteen_points_and_wraps_the_full_circle() {
+        assert_eq!(compass(0.0), "N");
+        assert_eq!(compass(90.0), "E");
+        assert_eq!(compass(180.0), "S");
+        assert_eq!(compass(270.0), "W");
+        // Rounds to the nearest point: 22.5° is the N/NNE boundary, 23° is NNE.
+        assert_eq!(compass(23.0), "NNE");
+        // 360° folds back to N, not off the end of the table.
+        assert_eq!(compass(360.0), "N");
+        assert_eq!(compass(359.9), "N");
+    }
+
+    #[test]
+    fn compass_folds_a_bearing_from_outside_zero_to_three_sixty() {
+        // A negative bearing names a real point rather than saturating to "N".
+        assert_eq!(compass(-90.0), "W");
+        assert_eq!(compass(-30.0), compass(330.0));
+        assert_eq!(compass(-30.0), "NNW");
+        // And one past a full turn.
+        assert_eq!(compass(450.0), "E");
     }
 }
