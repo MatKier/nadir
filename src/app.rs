@@ -1139,12 +1139,19 @@ fn search_task(http: reqwest::Client, data: Arc<RwLock<AppData>>, mut rx: watch:
 /// element-set fetch: [`TLE_RETRY_BASE`] doubled `fails - 1` times, clamped to
 /// [`TLE_RETRY_CAP`] — so 1m, 2m, 4m … 30m, 30m. `fails == 0` is the success
 /// path and never reaches here; it is defined as the base for totality.
-/// `checked_shl` guards the shift against an absurd failure count rather than
-/// wrapping to a tiny delay or panicking.
+///
+/// The clamp is applied in the exponent domain: `TLE_RETRY_BASE << 5` (32m)
+/// already exceeds the 30m cap, so any longer streak is just the cap. Doing
+/// it here — rather than shifting first and clamping the result — sidesteps
+/// `checked_shl` only guarding the *shift amount*, not value overflow:
+/// `60u64.checked_shl(62)` is `Some(0)`, which would otherwise turn a very
+/// long outage into a zero-delay retry loop.
 fn tle_retry_backoff(fails: u32) -> Duration {
     let steps = fails.saturating_sub(1);
-    let secs = TLE_RETRY_BASE.as_secs().checked_shl(steps).unwrap_or(u64::MAX);
-    Duration::from_secs(secs).min(TLE_RETRY_CAP)
+    if steps >= 5 {
+        return TLE_RETRY_CAP;
+    }
+    (TLE_RETRY_BASE * (1 << steps)).min(TLE_RETRY_CAP)
 }
 
 fn tle_task(
@@ -1895,7 +1902,12 @@ mod tests {
     }
 
     #[test]
-    fn tle_retry_backoff_saturates_rather_than_overflowing_on_an_absurd_streak() {
-        assert_eq!(tle_retry_backoff(u32::MAX), TLE_RETRY_CAP);
+    fn tle_retry_backoff_stays_at_the_cap_for_every_streak_length() {
+        // Not just u32::MAX: a mid-range streak once wrapped a `u64` shift to
+        // a zero-second delay. Every value at or past the cap must read as
+        // the cap.
+        for fails in [6u32, 7, 20, 63, 64, 65, 1000, u32::MAX] {
+            assert_eq!(tle_retry_backoff(fails), TLE_RETRY_CAP, "fails = {fails}");
+        }
     }
 }
