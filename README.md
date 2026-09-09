@@ -25,7 +25,9 @@ terminator and pass predictions.
 
 Only the element set needs the network, and at most every 12 hours. It is cached
 at `~/.cache/nadir/tle-<norad>.json` and keyed by cache age rather than process
-lifetime, so a restart with a cache under 12h old reads from disk.
+lifetime, so a restart with a cache under 12h old reads from disk. A refresh that
+fails retries on a 1m-to-30m exponential backoff rather than waiting the full
+12h, and says so in the activity log.
 
 ### Accuracy
 
@@ -228,7 +230,8 @@ Colour is judged against how often that feed refetches: green while at most two
 refreshes could have been missed, amber up to six, red beyond. So `SWX` (every
 5m) is green to 10m and amber to 30m, `AUR` (15m) green to 30m and amber to 90m,
 `LCH` (30m) green to 1h and amber to 3h, and `TLE` (12h) green to 24h and amber
-to 72h.
+to 72h. A feed whose last fetch attempt failed reads at least amber whatever its
+age, with the reason in the Recent activity log.
 
 ## Data sources
 

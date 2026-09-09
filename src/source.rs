@@ -25,6 +25,12 @@ pub struct Source<T> {
     value: Option<T>,
     updated_at: Option<Instant>,
     health: Health,
+    /// Why the most recent fetch *attempt* failed, or `None` when the last
+    /// attempt succeeded (or none has been made). Distinct from `health`: a
+    /// value warm-started from cache and one left stale by a failed refresh
+    /// are the same `Health::Stale` variant, so the failure has to be
+    /// remembered separately to be reported or to colour a chip.
+    last_error: Option<String>,
 }
 
 impl<T> Default for Source<T> {
@@ -33,6 +39,7 @@ impl<T> Default for Source<T> {
             value: None,
             updated_at: None,
             health: Health::Pending,
+            last_error: None,
         }
     }
 }
@@ -43,15 +50,28 @@ impl<T> Source<T> {
         self.value = Some(value);
         self.updated_at = Some(Instant::now());
         self.health = Health::Live;
+        self.last_error = None;
     }
 
     /// Note that a refresh failed. Keep any previous value but mark it stale,
     /// or surface the error if there is nothing to fall back to.
-    pub fn set_failed(&mut self, reason: impl Into<String>) {
+    ///
+    /// Returns `true` when this failure is *news* — a different reason than
+    /// the one already recorded, or the first failure since the last success
+    /// — so a caller can log the transition without writing one line per
+    /// retry through a sustained outage. Two reasons that alternate on every
+    /// retry would each read as news and log every time; in practice they
+    /// don't, because the caller truncates the upstream error to a stable
+    /// prefix before it gets here.
+    pub fn set_failed(&mut self, reason: impl Into<String>) -> bool {
+        let reason = reason.into();
         match self.updated_at {
             Some(t) => self.health = Health::Stale(t.elapsed()),
-            None => self.health = Health::Error(reason.into()),
+            None => self.health = Health::Error(reason.clone()),
         }
+        let is_news = self.last_error.as_deref() != Some(reason.as_str());
+        self.last_error = Some(reason);
+        is_news
     }
 
     /// Adopt a value recovered from disk cache, `age` old.
@@ -59,6 +79,10 @@ impl<T> Source<T> {
         self.value = Some(value);
         self.updated_at = Some(Instant::now().checked_sub(age).unwrap_or_else(Instant::now));
         self.health = Health::Stale(age);
+        // Reading a value off disk is not a failed fetch attempt — an entry
+        // that has simply aged past its TTL must not colour its chip as if a
+        // refresh had errored.
+        self.last_error = None;
     }
 
     pub fn get(&self) -> Option<&T> {
@@ -101,12 +125,22 @@ impl<T> Source<T> {
     /// given explicitly. [`Source::severity_for`] is the usual way in, deriving
     /// both from a feed's refresh interval; this is the primitive underneath.
     pub fn severity_with(&self, green_until: Duration, amber_until: Duration) -> u8 {
-        match self.health() {
+        let by_age = match self.health() {
             Health::Live => 0,
             Health::Pending => 1,
             Health::Stale(age) if age < green_until => 0,
             Health::Stale(age) if age < amber_until => 1,
             Health::Stale(_) | Health::Error(_) => 2,
+        };
+        // A feed whose last fetch attempt failed must never read nominal,
+        // even while its cached value is still young enough for the age
+        // thresholds alone to call it green — otherwise an element set that
+        // has been failing to refresh all day sits behind a green `TLE` chip
+        // until it is a full 24h stale. The age still decides amber vs. red.
+        if self.last_error.is_some() {
+            by_age.max(1)
+        } else {
+            by_age
         }
     }
 }
@@ -184,5 +218,44 @@ mod tests {
             );
             assert_eq!(src.severity_for(tle_ttl), want, "age {age_h}h");
         }
+    }
+
+    #[test]
+    fn set_failed_reports_the_first_failure_then_stays_quiet_until_the_reason_changes() {
+        let mut src: Source<()> = Source::default();
+        src.set_from_cache((), Duration::from_secs(60));
+        assert!(src.set_failed("connect timed out"), "the first failure is news");
+        assert!(!src.set_failed("connect timed out"), "the same reason again is not");
+        assert!(src.set_failed("bad status: 503"), "a different reason is news again");
+    }
+
+    #[test]
+    fn a_success_clears_the_error_so_the_next_outage_is_reported_again() {
+        let mut src: Source<()> = Source::default();
+        assert!(src.set_failed("connect timed out"));
+        src.set_live(());
+        assert!(src.set_failed("connect timed out"), "after a success the same reason is news");
+    }
+
+    #[test]
+    fn severity_never_reads_nominal_while_the_last_attempt_failed() {
+        let ttl = Duration::from_secs(12 * 3600);
+        // A cache young enough that the age thresholds alone call it green.
+        let mut src: Source<()> = Source::default();
+        src.set_from_cache((), Duration::from_secs(3600));
+        assert_eq!(src.severity_for(ttl), 0);
+        src.set_failed("connect timed out");
+        assert_eq!(src.severity_for(ttl), 1, "a failed refresh forces at least amber");
+    }
+
+    #[test]
+    fn adopting_a_cache_value_is_not_a_failed_attempt() {
+        let ttl = Duration::from_secs(12 * 3600);
+        let mut src: Source<()> = Source::default();
+        src.set_failed("connect timed out");
+        // A later warm start clears the failure — the value is trusted again,
+        // just old.
+        src.set_from_cache((), Duration::from_secs(3600));
+        assert_eq!(src.severity_for(ttl), 0);
     }
 }
