@@ -930,6 +930,15 @@ const WEATHER_KEY: &str = "weather";
 const LAUNCHES_KEY: &str = "launches";
 /// How long a cached element set is trusted before it's worth refetching.
 pub(crate) const TLE_TTL: Duration = Duration::from_secs(12 * 3600);
+/// After a *failed* element-set fetch, retry on an exponential backoff —
+/// [`TLE_RETRY_BASE`] doubling on each consecutive failure, clamped to
+/// [`TLE_RETRY_CAP`] — instead of waiting out the full [`TLE_TTL`]. One
+/// unreachable-Celestrak moment at startup otherwise pins the whole session
+/// to a stale element set for twelve hours with no retry. The `TLE` status
+/// chip still derives its colour thresholds from `TLE_TTL`: it reports how
+/// old the element set is, which the retry cadence doesn't change.
+const TLE_RETRY_BASE: Duration = Duration::from_secs(60);
+const TLE_RETRY_CAP: Duration = Duration::from_secs(30 * 60);
 /// How often each timer-driven feed refetches. Named rather than inline
 /// because `ui::status_bar` derives each chip's colour thresholds from the
 /// interval it is judging — a chip that hardcodes its own knees drifts away
@@ -970,6 +979,10 @@ struct Feed<T> {
     /// nowcast, refetched from scratch on its own schedule instead. `store`
     /// and `recover` are no-ops in that case.
     key: Option<String>,
+    /// Human name for the log line a failed fetch writes. Prose, matching how
+    /// README and the `?` overlay refer to each feed — `key` can't serve, the
+    /// aurora feed's is `None`.
+    name: &'static str,
     field: fn(&mut AppData) -> &mut Source<T>,
     decode: fn(&[u8]) -> Option<T>,
 }
@@ -982,10 +995,17 @@ impl<T> Feed<T> {
         }
     }
 
-    /// Note that a refresh failed.
+    /// Note that a refresh failed. Logs the failure once per transition —
+    /// `Source::set_failed` returns `true` only when the reason is new — so a
+    /// silent stale panel now says why, without one line per retry through an
+    /// outage. The note and the health it describes are written under one
+    /// lock, as the success-path note in `tle_task` is, so another task can't
+    /// slip a line between them.
     fn fail(&self, data: &Arc<RwLock<AppData>>, reason: String) {
         if let Ok(mut d) = data.write() {
-            (self.field)(&mut d).set_failed(reason);
+            if (self.field)(&mut d).set_failed(&reason) {
+                d.note(format!("{} refresh failed: {reason}", self.name));
+            }
         }
     }
 
@@ -1031,6 +1051,7 @@ impl Feed<Tracker> {
     fn tle(norad: u64) -> Self {
         Self {
             key: Some(format!("{TLE_KEY}-{norad}")),
+            name: "element set",
             field: |d| &mut d.tle,
             decode: |bytes| {
                 String::from_utf8(bytes.to_vec())
@@ -1045,6 +1066,7 @@ impl Feed<Indices> {
     fn weather() -> Self {
         Self {
             key: Some(WEATHER_KEY.to_string()),
+            name: "space weather",
             field: |d| &mut d.weather,
             decode: |b| serde_json::from_slice::<Indices>(b).ok(),
         }
@@ -1055,6 +1077,7 @@ impl Feed<Launches> {
     fn launches() -> Self {
         Self {
             key: Some(LAUNCHES_KEY.to_string()),
+            name: "launch manifest",
             field: |d| &mut d.launches,
             decode: |b| serde_json::from_slice::<Launches>(b).ok(),
         }
@@ -1065,7 +1088,7 @@ impl Feed<AuroraGrid> {
     /// Never cached (see [`Feed::key`]); `decode` is consequently never
     /// called.
     fn aurora() -> Self {
-        Self { key: None, field: |d| &mut d.aurora, decode: |_| None }
+        Self { key: None, name: "aurora nowcast", field: |d| &mut d.aurora, decode: |_| None }
     }
 }
 
@@ -1112,6 +1135,18 @@ fn search_task(http: reqwest::Client, data: Arc<RwLock<AppData>>, mut rx: watch:
     });
 }
 
+/// The backoff delay before the `fails`-th consecutive retry of a failed
+/// element-set fetch: [`TLE_RETRY_BASE`] doubled `fails - 1` times, clamped to
+/// [`TLE_RETRY_CAP`] — so 1m, 2m, 4m … 30m, 30m. `fails == 0` is the success
+/// path and never reaches here; it is defined as the base for totality.
+/// `checked_shl` guards the shift against an absurd failure count rather than
+/// wrapping to a tiny delay or panicking.
+fn tle_retry_backoff(fails: u32) -> Duration {
+    let steps = fails.saturating_sub(1);
+    let secs = TLE_RETRY_BASE.as_secs().checked_shl(steps).unwrap_or(u64::MAX);
+    Duration::from_secs(secs).min(TLE_RETRY_CAP)
+}
+
 fn tle_task(
     http: reqwest::Client,
     cache: Cache,
@@ -1126,11 +1161,19 @@ fn tle_task(
         // cache is still within the TTL, just uses what's on disk instead
         // of spending a fetch nothing needed.
         let mut force = false;
+        // Consecutive failed fetches of the *current* satellite's element
+        // set. Drives the retry backoff below; reset by any success, by a
+        // satellite switch, and whenever a fresh-enough cache means there is
+        // no outage to back off from.
+        let mut fails: u32 = 0;
 
         loop {
             let norad = *sat_rx.borrow();
             let switched = norad != prev_norad;
             prev_norad = norad;
+            if switched {
+                fails = 0;
+            }
             let feed = Feed::<Tracker>::tle(norad);
             let cache_age = feed.key.as_deref().and_then(|k| cache.age(k));
             let stale = cache_age.is_none_or(|age| age >= TLE_TTL);
@@ -1147,20 +1190,33 @@ fn tle_task(
                                 d.note(format!("TLE for {} updated", tracker.name()));
                                 (feed.field)(&mut d).set_live(tracker);
                             }
+                            fails = 0;
+                            TLE_TTL
                         }
-                        Err(e) => feed.fail(&data, short(&e)),
+                        Err(e) => {
+                            // A malformed 200 body is retried on the same
+                            // backoff as a transport failure: it's as likely
+                            // a transient proxy page as a real data fault,
+                            // and the cap bounds the cost either way.
+                            feed.fail(&data, short(&e));
+                            fails += 1;
+                            tle_retry_backoff(fails)
+                        }
                     },
                     Err(e) => {
                         feed.recover(&cache, &data);
                         feed.fail(&data, short(&e));
+                        fails += 1;
+                        tle_retry_backoff(fails)
                     }
                 }
-                TLE_TTL
             } else {
                 // Not stale and nothing forced a refetch — load it from disk
                 // (a no-op once already loaded, e.g. by the startup warm
-                // start) and just wait out whatever's left of its window.
+                // start) and just wait out whatever's left of its window. A
+                // cache this fresh means no outage to back off from.
                 feed.recover(&cache, &data);
+                fails = 0;
                 TLE_TTL.saturating_sub(cache_age.unwrap_or(TLE_TTL))
             };
 
@@ -1824,5 +1880,22 @@ mod tests {
             app.passes_from.expect("rebuilt") - built_for > chrono::Duration::minutes(50),
             "the window moved with the clock",
         );
+    }
+
+    #[test]
+    fn tle_retry_backoff_doubles_from_one_minute_and_caps_at_thirty() {
+        assert_eq!(tle_retry_backoff(1), Duration::from_secs(60));
+        assert_eq!(tle_retry_backoff(2), Duration::from_secs(120));
+        assert_eq!(tle_retry_backoff(3), Duration::from_secs(240));
+        assert_eq!(tle_retry_backoff(4), Duration::from_secs(480));
+        assert_eq!(tle_retry_backoff(5), Duration::from_secs(960));
+        // 60 << 5 is 32 minutes, past the cap.
+        assert_eq!(tle_retry_backoff(6), TLE_RETRY_CAP);
+        assert_eq!(tle_retry_backoff(7), TLE_RETRY_CAP);
+    }
+
+    #[test]
+    fn tle_retry_backoff_saturates_rather_than_overflowing_on_an_absurd_streak() {
+        assert_eq!(tle_retry_backoff(u32::MAX), TLE_RETRY_CAP);
     }
 }

@@ -235,6 +235,8 @@ fn content(app: &App) -> Vec<Line<'static>> {
     row(&mut l, "AUR", "every 15m — green to 30m, amber to 90m");
     row(&mut l, "LCH", "every 30m — green to 1h, amber to 3h");
     row(&mut l, "TLE", "every 12h — green to 24h, amber to 72h");
+    text(&mut l, "A feed whose last fetch attempt failed reads at least amber whatever");
+    text(&mut l, "its age, and logs why under Recent activity.");
     text(&mut l, "`r` refetches only the focused panel's feeds, without spending a");
     text(&mut l, "request on anything else.");
     blank(&mut l);
@@ -250,10 +252,11 @@ fn content(app: &App) -> Vec<Line<'static>> {
     text(&mut l, "Only the element set needs the network, and at most every 12h; it's");
     text(&mut l, "cached at ~/.cache/nadir/tle-<norad>.json, keyed by the cache's own");
     text(&mut l, "age rather than session length — a restart with a cache under 12h old");
-    text(&mut l, "reads it straight from disk instead of refetching. Accuracy decays");
-    text(&mut l, "away from that epoch — roughly a km near it, tens of km after a week");
-    text(&mut l, "in low orbit — which the TELEMETRY panel's ACC row estimates and the");
-    text(&mut l, "amber/red TLE age flags.");
+    text(&mut l, "reads it straight from disk instead of refetching. A refresh that");
+    text(&mut l, "fails retries on a 1m-to-30m backoff, not after another 12h.");
+    text(&mut l, "Accuracy decays away from that epoch — roughly a km near it, tens of");
+    text(&mut l, "km after a week in low orbit — which the TELEMETRY panel's ACC row");
+    text(&mut l, "estimates and the amber/red TLE age flags.");
     text(&mut l, "What can't be computed, and so goes stale or blank offline: space");
     text(&mut l, "weather, aurora, and the launch manifest.");
     text(&mut l, "--offline makes zero network requests and loads the last cached");
