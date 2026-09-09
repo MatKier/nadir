@@ -42,8 +42,8 @@ than a reimplementation.
 ### Local math, network only for element sets
 
 Position is computed, not fetched. `api::celestrak` pulls a GP/TLE element set
-at most every 12 hours (`TLE_TTL` in `app.rs`) and `orbit::propagate::Tracker`
-runs SGP4/SDP4 on it. Ground track, footprint, eclipse state, look angles, the
+at most once per `config::Intervals::tle` (default 12h, floor 1h) and
+`orbit::propagate::Tracker` runs SGP4/SDP4 on it. Ground track, footprint, eclipse state, look angles, the
 terminator and pass prediction are all pure functions over that result —
 `geo.rs` and `orbit/` do no I/O whatsoever, which is what makes them testable
 without a network or a terminal. Keep it that way: no I/O below `orbit/`.
@@ -70,9 +70,10 @@ focused panel's feed to refetch. The TLE task is the exception: it wakes on the
 either way, so panels warm-start from disk instead of sitting on a placeholder.
 
 Adding a feed touches six places: a `Feed<T>` constructor, a task fn, a
-`Notifiers` field, the chip list in `ui::status_bar`, its refresh-interval
-constant next to `TLE_TTL` (the chip derives its colour thresholds from it),
-and — if it is cached — `load_all_from_cache`.
+`Notifiers` field, the chip list in `ui::status_bar`, a field on
+`config::Intervals` (its default, its floor, and the `Duration` threaded into
+the task via `spawn_fetch_tasks` — the chip derives its colour thresholds from
+that same value), and — if it is cached — `load_all_from_cache`.
 
 ### Panels
 
@@ -92,9 +93,12 @@ help overlay.
 Launch Library's anonymous tier allows roughly 15 requests an hour;
 `api::launches::rate_guard()` budgets 8, and `RateGuard::try_take` refuses
 rather than sleeps so the caller can serve cache instead of queueing. A `429`
-falls back once to the `lldev.thespacedevs.com` mirror. The 12-hour TLE TTL and
-the 5/15-minute weather and aurora intervals are deliberate — don't shorten them
-to make a change easier to observe.
+falls back once to the `lldev.thespacedevs.com` mirror. The feed intervals
+(`config::Intervals`, default 12h TLE / 5m weather / 15m aurora / 30m launches)
+are user-configurable but only *upward*: `Intervals::clamped` enforces a floor
+per feed (1h / 1m / 5m / 10m) so no config file can turn nadir into a bad
+upstream client. Don't shorten the defaults, or weaken a floor, to make a change
+easier to observe.
 
 ## Conventions
 

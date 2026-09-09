@@ -118,7 +118,7 @@ impl<T> Source<T> {
     /// `Stale` after a second, so these thresholds — not the `Live` arm — are
     /// what actually colours a chip.
     pub fn severity_for(&self, every: Duration) -> u8 {
-        self.severity_with(2 * every, 6 * every)
+        self.severity_with(GREEN_MULT * every, AMBER_MULT * every)
     }
 
     /// The `Stale` age thresholds for "still green" and "amber, not yet bad"
@@ -144,6 +144,14 @@ impl<T> Source<T> {
         }
     }
 }
+
+/// A chip stays green while a stale value is younger than [`GREEN_MULT`] times
+/// its feed's refresh interval — i.e. at most two refreshes could have been
+/// missed — and amber up to [`AMBER_MULT`] times, then red. Named so the `?`
+/// overlay can spell the same ladder out from the same numbers instead of
+/// restating "green to 24h, amber to 72h" by hand.
+pub(crate) const GREEN_MULT: u32 = 2;
+pub(crate) const AMBER_MULT: u32 = 6;
 
 /// Render a duration as a compact age string: `4s`, `12m`, `3h`, `2d`.
 pub fn fmt_age(d: Duration) -> String {
