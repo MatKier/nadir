@@ -14,7 +14,7 @@ use crate::api::celestrak::SatMatch;
 use crate::api::launches::{Fetched, Launches};
 use crate::api::swpc::{AuroraGrid, Indices};
 use crate::cache::Cache;
-use crate::config::Config;
+use crate::config::{Config, Intervals};
 use crate::orbit::{predict_passes, Pass, Tracker};
 use crate::simclock::{ClockState, SimClock};
 use crate::source::Source;
@@ -793,16 +793,29 @@ pub async fn run(mut config: Config) -> Result<()> {
     let (search_tx, search_rx) = watch::channel(String::new());
     let notifiers = Notifiers::new();
 
+    // Enforce the polling floors before anything reads an interval — including
+    // the status chips, which judge freshness against `config.intervals`, so
+    // the dashboard describes the schedule it is actually keeping even on
+    // `--offline`. A too-eager value is honoured up to its floor and no
+    // further; each one raised is logged so the user can see why.
+    let (intervals, adjusted) = config.intervals.clamped();
+    config.intervals = intervals;
+
     // Warm-start from whatever each source last cached, so panels show the
     // last known value immediately instead of a "pending" placeholder while
     // the first fetch of the session is still in flight.
     load_all_from_cache(&cache, &data, config.sat);
+    if let Ok(mut d) = data.write() {
+        for note in adjusted {
+            d.note(format!("config: {note}"));
+        }
+    }
     if config.offline {
         if let Ok(mut d) = data.write() {
             d.note("offline mode — showing cached data only");
         }
     } else {
-        spawn_fetch_tasks(&http, &cache, &data, sat_rx, search_rx, notifiers.clone());
+        spawn_fetch_tasks(&http, &cache, &data, intervals, sat_rx, search_rx, notifiers.clone());
     }
 
     let (input_tx, input_rx) = mpsc::unbounded_channel();
@@ -928,24 +941,18 @@ fn spawn_input_thread(tx: mpsc::UnboundedSender<Event>) {
 const TLE_KEY: &str = "tle";
 const WEATHER_KEY: &str = "weather";
 const LAUNCHES_KEY: &str = "launches";
-/// How long a cached element set is trusted before it's worth refetching.
-pub(crate) const TLE_TTL: Duration = Duration::from_secs(12 * 3600);
 /// After a *failed* element-set fetch, retry on an exponential backoff —
 /// [`TLE_RETRY_BASE`] doubling on each consecutive failure, clamped to
-/// [`TLE_RETRY_CAP`] — instead of waiting out the full [`TLE_TTL`]. One
-/// unreachable-Celestrak moment at startup otherwise pins the whole session
-/// to a stale element set for twelve hours with no retry. The `TLE` status
-/// chip still derives its colour thresholds from `TLE_TTL`: it reports how
-/// old the element set is, which the retry cadence doesn't change.
+/// [`TLE_RETRY_CAP`] — instead of waiting out the full configured TLE interval
+/// (`config::Intervals::tle`). One unreachable-Celestrak moment at startup
+/// otherwise pins the whole session to a stale element set for hours with no
+/// retry. The cap stays comfortably under that interval — its 1-hour floor is
+/// set partly to guarantee this — so a retry streak always resolves before a
+/// healthy refresh would have. The `TLE` status chip still derives its colour
+/// thresholds from the interval, not the retry cadence: it reports how old the
+/// element set is.
 const TLE_RETRY_BASE: Duration = Duration::from_secs(60);
 const TLE_RETRY_CAP: Duration = Duration::from_secs(30 * 60);
-/// How often each timer-driven feed refetches. Named rather than inline
-/// because `ui::status_bar` derives each chip's colour thresholds from the
-/// interval it is judging — a chip that hardcodes its own knees drifts away
-/// from its feed's schedule the moment one of them is retuned.
-pub(crate) const WEATHER_INTERVAL: Duration = Duration::from_secs(5 * 60);
-pub(crate) const AURORA_INTERVAL: Duration = Duration::from_secs(15 * 60);
-pub(crate) const LAUNCHES_INTERVAL: Duration = Duration::from_secs(30 * 60);
 
 /// The shortest real interval between two warp-driven pass-list rebuilds. A
 /// rebuild is a 96-hour scan — order twelve thousand SGP4 propagations, run
@@ -1096,14 +1103,18 @@ fn spawn_fetch_tasks(
     http: &reqwest::Client,
     cache: &Cache,
     data: &Arc<RwLock<AppData>>,
+    intervals: Intervals,
     sat_rx: watch::Receiver<u64>,
     search_rx: watch::Receiver<String>,
     notifiers: Notifiers,
 ) {
-    tle_task(http.clone(), cache.clone(), data.clone(), sat_rx);
-    weather_task(http.clone(), cache.clone(), data.clone(), notifiers.weather);
-    aurora_task(http.clone(), data.clone(), notifiers.aurora);
-    launches_task(http.clone(), cache.clone(), data.clone(), notifiers.launches);
+    // `Intervals` is `Copy` and nothing retunes it once the app is running
+    // (the config is not editable in-app), so each task just takes its own
+    // `Duration` by value rather than sharing a channel.
+    tle_task(http.clone(), cache.clone(), data.clone(), intervals.tle, sat_rx);
+    weather_task(http.clone(), cache.clone(), data.clone(), intervals.weather, notifiers.weather);
+    aurora_task(http.clone(), data.clone(), intervals.aurora, notifiers.aurora);
+    launches_task(http.clone(), cache.clone(), data.clone(), intervals.launches, notifiers.launches);
     search_task(http.clone(), data.clone(), search_rx);
 }
 
@@ -1158,6 +1169,7 @@ fn tle_task(
     http: reqwest::Client,
     cache: Cache,
     data: Arc<RwLock<AppData>>,
+    ttl: Duration,
     mut sat_rx: watch::Receiver<u64>,
 ) {
     tokio::spawn(async move {
@@ -1183,7 +1195,7 @@ fn tle_task(
             }
             let feed = Feed::<Tracker>::tle(norad);
             let cache_age = feed.key.as_deref().and_then(|k| cache.age(k));
-            let stale = cache_age.is_none_or(|age| age >= TLE_TTL);
+            let stale = cache_age.is_none_or(|age| age >= ttl);
 
             let wait = if stale || (force && !switched) {
                 match api::celestrak::fetch_gp_json(&http, norad).await {
@@ -1198,7 +1210,7 @@ fn tle_task(
                                 (feed.field)(&mut d).set_live(tracker);
                             }
                             fails = 0;
-                            TLE_TTL
+                            ttl
                         }
                         Err(e) => {
                             // A malformed 200 body is retried on the same
@@ -1224,7 +1236,7 @@ fn tle_task(
                 // cache this fresh means no outage to back off from.
                 feed.recover(&cache, &data);
                 fails = 0;
-                TLE_TTL.saturating_sub(cache_age.unwrap_or(TLE_TTL))
+                ttl.saturating_sub(cache_age.unwrap_or(ttl))
             };
 
             tokio::select! {
@@ -1235,10 +1247,16 @@ fn tle_task(
     });
 }
 
-fn weather_task(http: reqwest::Client, cache: Cache, data: Arc<RwLock<AppData>>, notify: Arc<Notify>) {
+fn weather_task(
+    http: reqwest::Client,
+    cache: Cache,
+    data: Arc<RwLock<AppData>>,
+    period: Duration,
+    notify: Arc<Notify>,
+) {
     tokio::spawn(async move {
         let feed = Feed::<Indices>::weather();
-        let mut ticker = tokio::time::interval(WEATHER_INTERVAL);
+        let mut ticker = tokio::time::interval(period);
         loop {
             tokio::select! {
                 _ = ticker.tick() => {}
@@ -1257,10 +1275,15 @@ fn weather_task(http: reqwest::Client, cache: Cache, data: Arc<RwLock<AppData>>,
     });
 }
 
-fn aurora_task(http: reqwest::Client, data: Arc<RwLock<AppData>>, notify: Arc<Notify>) {
+fn aurora_task(
+    http: reqwest::Client,
+    data: Arc<RwLock<AppData>>,
+    period: Duration,
+    notify: Arc<Notify>,
+) {
     tokio::spawn(async move {
         let feed = Feed::<AuroraGrid>::aurora();
-        let mut ticker = tokio::time::interval(AURORA_INTERVAL);
+        let mut ticker = tokio::time::interval(period);
         loop {
             tokio::select! {
                 _ = ticker.tick() => {}
@@ -1278,14 +1301,15 @@ fn launches_task(
     http: reqwest::Client,
     cache: Cache,
     data: Arc<RwLock<AppData>>,
+    period: Duration,
     notify: Arc<Notify>,
 ) {
     tokio::spawn(async move {
         let feed = Feed::<Launches>::launches();
         let guard = api::launches::rate_guard();
-        let mut ticker = tokio::time::interval(LAUNCHES_INTERVAL);
+        let mut ticker = tokio::time::interval(period);
         // Set only when a `429` needs a shorter, targeted retry instead of
-        // waiting out the normal 30-minute interval.
+        // waiting out the normal refresh interval.
         let mut retry_at: Option<Instant> = None;
         loop {
             let retry_sleep = async {

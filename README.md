@@ -23,11 +23,12 @@ velocity at any instant. Everything derived from that is math with no I/O:
 ground track, footprint, sunlit/eclipsed state, look angles, the day/night
 terminator and pass predictions.
 
-Only the element set needs the network, and at most every 12 hours. It is cached
-at `~/.cache/nadir/tle-<norad>.json` and keyed by cache age rather than process
-lifetime, so a restart with a cache under 12h old reads from disk. A refresh that
-fails retries on a 1m-to-30m exponential backoff rather than waiting the full
-12h, and says so in the activity log.
+Only the element set needs the network, and by default at most every 12 hours
+(configurable — see [Refresh intervals](#refresh-intervals)). It is cached at
+`~/.cache/nadir/tle-<norad>.json` and keyed by cache age rather than process
+lifetime, so a restart with a cache younger than that interval reads from disk.
+A refresh that fails retries on a 1m-to-30m exponential backoff rather than
+waiting the full interval, and says so in the activity log.
 
 ### Accuracy
 
@@ -96,6 +97,30 @@ terminal or larger.
 `--location` is resolved once at startup via Open-Meteo's geocoding API and the
 result saved like a geolocated or hand-typed one. An ambiguous name takes the
 most prominent match; add a country or state to disambiguate.
+
+### Refresh intervals
+
+How often each network-backed feed refetches is set under `[intervals]` in
+`config.toml`, as duration strings (`s` / `m` / `h` / `d`, same vocabulary as
+the in-app time prompt). The defaults, written on a first run, are:
+
+```toml
+[intervals]
+tle = "12h"     # element set — propagation is local, so this is rarely needed
+weather = "5m"  # NOAA SWPC space-weather indices
+aurora = "15m"  # OVATION aurora nowcast
+launches = "30m" # Launch Library upcoming-launch manifest
+```
+
+Longer is always allowed. Shorter is clamped to a per-feed floor that keeps
+nadir a well-behaved client of each upstream — `tle` ≥ 1h, `weather` ≥ 1m,
+`aurora` ≥ 5m, `launches` ≥ 10m (Launch Library's anonymous tier allows only
+~15 requests an hour). A value below its floor is raised and noted in the
+activity log; the file is left as you wrote it. A value that doesn't parse
+(`"banana"`, `"12"`, `"-5m"`) is a startup error, not a silent fallback.
+
+The status chips and the `?` overlay judge freshness against whatever these are
+set to, so a feed refetching on its configured schedule always reads green.
 
 ### Tracking other objects
 
@@ -227,11 +252,12 @@ has gone stale, e.g. `space weather · 1m old`.
 (nothing fetched yet this session), `live`, an age such as `5s` / `12m` since
 the last successful fetch, or `err` (failed with nothing to fall back on).
 Colour is judged against how often that feed refetches: green while at most two
-refreshes could have been missed, amber up to six, red beyond. So `SWX` (every
-5m) is green to 10m and amber to 30m, `AUR` (15m) green to 30m and amber to 90m,
-`LCH` (30m) green to 1h and amber to 3h, and `TLE` (12h) green to 24h and amber
-to 72h. A feed whose last fetch attempt failed reads at least amber whatever its
-age, with the reason in the Recent activity log.
+refreshes could have been missed, amber up to six, red beyond. So at the default
+intervals `SWX` (every 5m) is green to 10m and amber to 30m, `AUR` (15m) green to
+30m and amber to 90m, `LCH` (30m) green to 1h and amber to 3h, and `TLE` (12h)
+green to 24h and amber to 72h; change an interval under `[intervals]` and its
+chip's ladder scales with it. A feed whose last fetch attempt failed reads at
+least amber whatever its age, with the reason in the Recent activity log.
 
 ## Data sources
 
@@ -281,9 +307,10 @@ src/
 Everything but `main.rs` sits behind a library target, so the integration test
 drives the real propagation pipeline rather than a copy of it.
 
-One tokio task per data source, each on its own interval, writing into shared
-state behind a lock. The render loop never awaits the network, so a slow or dead
-feed cannot stall the frame rate.
+One tokio task per data source, each on its own interval (`[intervals]` in the
+config, with per-feed floors), writing into shared state behind a lock. The
+render loop never awaits the network, so a slow or dead feed cannot stall the
+frame rate.
 
 ## License
 

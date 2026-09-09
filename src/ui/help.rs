@@ -8,6 +8,8 @@ use ratatui::widgets::{Block, Clear, Paragraph, Wrap};
 use ratatui::Frame;
 
 use crate::app::App;
+use crate::config::fmt_interval;
+use crate::source::{AMBER_MULT, GREEN_MULT};
 use crate::ui::{centered, Theme};
 
 /// Draw the overlay and clamp `app.help_scroll` to what the content actually
@@ -231,12 +233,30 @@ fn content(app: &App) -> Vec<Line<'static>> {
     text(&mut l, "Colour is judged against how often that feed refetches: green while");
     text(&mut l, "at most two refreshes could have been missed, amber up to six, then");
     text(&mut l, "red. Waiting and failed-with-nothing-cached also read amber and red.");
-    row(&mut l, "SWX", "refetches every 5m — green to 10m, amber to 30m");
-    row(&mut l, "AUR", "every 15m — green to 30m, amber to 90m");
-    row(&mut l, "LCH", "every 30m — green to 1h, amber to 3h");
-    row(&mut l, "TLE", "every 12h — green to 24h, amber to 72h");
-    text(&mut l, "A feed whose last fetch attempt failed reads at least amber whatever");
-    text(&mut l, "its age, and logs why under Recent activity.");
+    // The ladders are derived, not spelled out, so they follow whatever is set
+    // under `[intervals]` in config.toml — with the shipped defaults this
+    // prints the same "every 5m — green to 10m, amber to 30m" as before.
+    for (chip, every) in [
+        ("SWX", app.config.intervals.weather),
+        ("AUR", app.config.intervals.aurora),
+        ("LCH", app.config.intervals.launches),
+        ("TLE", app.config.intervals.tle),
+    ] {
+        row(
+            &mut l,
+            chip,
+            &format!(
+                "refetches every {} — green to {}, amber to {}",
+                fmt_interval(every),
+                fmt_interval(GREEN_MULT * every),
+                fmt_interval(AMBER_MULT * every),
+            ),
+        );
+    }
+    text(&mut l, "Those cadences are the defaults; set your own under [intervals] in");
+    text(&mut l, "config.toml (\"12h\", \"5m\" …). A feed whose last fetch attempt failed");
+    text(&mut l, "reads at least amber whatever its age, and logs why under Recent");
+    text(&mut l, "activity.");
     text(&mut l, "`r` refetches only the focused panel's feeds, without spending a");
     text(&mut l, "request on anything else.");
     blank(&mut l);
@@ -249,11 +269,12 @@ fn content(app: &App) -> Vec<Line<'static>> {
     text(&mut l, "that is pure math with no I/O: ground track, footprint, sunlit/");
     text(&mut l, "eclipsed, look angles, the terminator and every pass prediction —");
     text(&mut l, "so the map and passes panel work fully offline.");
-    text(&mut l, "Only the element set needs the network, and at most every 12h; it's");
-    text(&mut l, "cached at ~/.cache/nadir/tle-<norad>.json, keyed by the cache's own");
-    text(&mut l, "age rather than session length — a restart with a cache under 12h old");
-    text(&mut l, "reads it straight from disk instead of refetching. A refresh that");
-    text(&mut l, "fails retries on a 1m-to-30m backoff, not after another 12h.");
+    let tle_iv = fmt_interval(app.config.intervals.tle);
+    text(&mut l, &format!("Only the element set needs the network, and at most every {tle_iv};"));
+    text(&mut l, "it's cached at ~/.cache/nadir/tle-<norad>.json, keyed by the cache's");
+    text(&mut l, &format!("own age rather than session length — a restart with a cache under {tle_iv}"));
+    text(&mut l, "old reads it straight from disk instead of refetching. A refresh that");
+    text(&mut l, &format!("fails retries on a 1m-to-30m backoff, not after another {tle_iv}."));
     text(&mut l, "Accuracy decays away from that epoch — roughly a km near it, tens of");
     text(&mut l, "km after a week in low orbit — which the TELEMETRY panel's ACC row");
     text(&mut l, "estimates and the amber/red TLE age flags.");

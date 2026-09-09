@@ -350,13 +350,15 @@ fn status_bar(frame: &mut Frame, area: Rect, app: &App, data: &crate::app::AppDa
     let mut spans = vec![Span::raw(" ")];
     let mut width: u16 = 1;
     for (name, sev, text) in [
-        // Each chip's thresholds come from its own feed's interval, so a feed
-        // refetching exactly on schedule reads green whether that schedule is
-        // five minutes or twelve hours — and amber genuinely means "late".
-        chip("TLE", &data.tle, crate::app::TLE_TTL),
-        chip("SWX", &data.weather, crate::app::WEATHER_INTERVAL),
-        chip("AUR", &data.aurora, crate::app::AURORA_INTERVAL),
-        chip("LCH", &data.launches, crate::app::LAUNCHES_INTERVAL),
+        // Each chip's thresholds come from its own feed's *configured*
+        // interval, so a feed refetching exactly on schedule reads green
+        // whether that schedule is the shipped default or something the user
+        // set under `[intervals]` — and amber genuinely means "late for the
+        // cadence in effect", not late for a hardcoded one.
+        chip("TLE", &data.tle, app.config.intervals.tle),
+        chip("SWX", &data.weather, app.config.intervals.weather),
+        chip("AUR", &data.aurora, app.config.intervals.aurora),
+        chip("LCH", &data.launches, app.config.intervals.launches),
     ] {
         let color = match sev {
             0 => Theme::NOMINAL,
