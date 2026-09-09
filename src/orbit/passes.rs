@@ -44,10 +44,6 @@ impl Pass {
 /// and whether the satellite is catching sunlight there.
 #[derive(Debug, Clone, Copy)]
 pub struct SkySample {
-    /// The instant this sample was propagated to. Kept for callers that mark a
-    /// live position on the arc; the sky plot itself reads only the angles.
-    #[allow(dead_code)]
-    pub at: DateTime<Utc>,
     /// Azimuth in degrees clockwise from true north, in `[0, 360)`.
     pub azimuth_deg: f64,
     /// Elevation above the horizon in degrees; negative means below it.
@@ -70,7 +66,6 @@ pub fn sky_sample(
     let state = tracker.state_at(t).ok()?;
     let look = look_angles(station, state.ecef_km);
     Some(SkySample {
-        at: t,
         azimuth_deg: look.azimuth_deg,
         elevation_deg: look.elevation_deg,
         sunlit: state.sunlit,
@@ -98,11 +93,13 @@ pub fn sample_pass(
         .collect()
 }
 
+/// Elevation in degrees at `t`, or `-90.0` when the propagator refuses that
+/// time — the coarse scan then reads it as "far below the horizon" and moves
+/// on, rather than mistaking a gap for a crossing. A thin projection of
+/// [`sky_sample`] so the propagate-then-look-angles call lives in exactly one
+/// place.
 fn elevation_at(tracker: &Tracker, station: &GeoPoint, t: DateTime<Utc>) -> f64 {
-    match tracker.state_at(t) {
-        Ok(state) => look_angles(station, state.ecef_km).elevation_deg,
-        Err(_) => -90.0,
-    }
+    sky_sample(tracker, station, t).map_or(-90.0, |s| s.elevation_deg)
 }
 
 /// Predict passes with peak elevation above [`MIN_PEAK_ELEVATION_DEG`] that
@@ -183,11 +180,11 @@ pub fn predict_passes(
     passes
 }
 
+/// Azimuth in degrees at `t`, or `0.0` on a propagation failure. Only ever
+/// read for the AOS/LOS bearings of a pass the scan already accepted, so the
+/// fallback is cosmetic. The [`sky_sample`] twin of [`elevation_at`].
 fn azimuth_at(tracker: &Tracker, station: &GeoPoint, t: DateTime<Utc>) -> f64 {
-    tracker
-        .state_at(t)
-        .map(|s| look_angles(station, s.ecef_km).azimuth_deg)
-        .unwrap_or(0.0)
+    sky_sample(tracker, station, t).map_or(0.0, |s| s.azimuth_deg)
 }
 
 /// Bisect the horizon crossing bracketed by `lo` and `hi`, to ~1 s. `rising`
@@ -270,13 +267,11 @@ fn golden_section_peak(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::orbit::test_tracker;
+    use crate::orbit::{test_passes, test_station, test_tracker};
 
     #[test]
     fn iss_produces_several_well_formed_passes_over_a_mid_latitude_site() {
-        let tr = test_tracker();
-        let munich = GeoPoint::new(48.137, 11.575, 0.52);
-        let passes = predict_passes(&tr, &munich, tr.epoch(), Duration::hours(48), 20);
+        let passes = test_passes();
 
         assert!(
             (3..=25).contains(&passes.len()),
@@ -304,9 +299,8 @@ mod tests {
     #[test]
     fn a_scan_starting_mid_pass_misses_it_but_one_starting_before_the_rise_does_not() {
         let tr = test_tracker();
-        let munich = GeoPoint::new(48.137, 11.575, 0.52);
-        let passes = predict_passes(&tr, &munich, tr.epoch(), Duration::hours(48), 20);
-        let pass = passes.first().expect("at least one ISS pass in 48 h").clone();
+        let munich = test_station();
+        let pass = test_passes().first().expect("at least one ISS pass in 48 h").clone();
 
         // Scanning from inside the pass: its rise is behind us, so it's gone.
         let midpoint = pass.aos + (pass.los - pass.aos) / 2;
@@ -342,8 +336,8 @@ mod tests {
     #[test]
     fn both_ends_of_a_pass_are_bisected_onto_the_horizon() {
         let tr = test_tracker();
-        let munich = GeoPoint::new(48.137, 11.575, 0.52);
-        let passes = predict_passes(&tr, &munich, tr.epoch(), Duration::hours(48), 20);
+        let munich = test_station();
+        let passes = test_passes();
         assert!(!passes.is_empty(), "the fixture must yield passes to check");
 
         for p in &passes {
@@ -357,8 +351,8 @@ mod tests {
     #[test]
     fn a_sampled_pass_starts_and_ends_near_the_horizon_and_peaks_between_them() {
         let tr = test_tracker();
-        let munich = GeoPoint::new(48.137, 11.575, 0.52);
-        let passes = predict_passes(&tr, &munich, tr.epoch(), Duration::hours(48), 20);
+        let munich = test_station();
+        let passes = test_passes();
         let pass = passes.first().expect("at least one ISS pass in 48 h");
 
         let arc = sample_pass(&tr, &munich, pass, 120);
@@ -380,8 +374,8 @@ mod tests {
     #[test]
     fn sampled_azimuths_agree_with_the_pass_summary_at_aos_and_los() {
         let tr = test_tracker();
-        let munich = GeoPoint::new(48.137, 11.575, 0.52);
-        let passes = predict_passes(&tr, &munich, tr.epoch(), Duration::hours(48), 20);
+        let munich = test_station();
+        let passes = test_passes();
         let pass = passes.first().expect("at least one ISS pass in 48 h");
 
         let arc = sample_pass(&tr, &munich, pass, 120);

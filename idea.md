@@ -7,28 +7,7 @@ Ordered roughly by value-to-effort within each section.
 
 ## Bigger features
 
-### 1. Sky plot for a highlighted pass
-
-A polar azimuth/elevation chart of one pass — compass rose, horizon at the rim,
-zenith at the centre, the satellite's arc across it with AOS/LOS azimuths and the
-peak marked. Highlighting a row in Passes expands to show it, the same
-"highlight expands detail" idiom Launches already uses for pads.
-
-The math is entirely present: sample `geo::look_angles` at intervals between
-`Pass::aos` and `Pass::los`. `Pass::peak` is currently computed by
-golden-section search and then thrown away (`#[allow(dead_code)]` in
-`orbit/passes.rs`); this is what it is for.
-
-Touches: `ui/panels/passes.rs`, or a new `ui/panels/skyplot.rs` rendered into
-the Passes area. A ratatui `Canvas` with braille markers, like `ui/map.rs`.
-
-Open question: where it goes. Passes is `Min(0)` in the right column and often
-short on rows; a plot may want the map area, or a `Panel::ALL` entry of its own —
-which per CLAUDE.md means also updating `ui/help.rs`, the `status_bar` hint and
-README's key table, and widening the `Char(c @ '1'..='6')` pattern in
-`handle_key`.
-
-### 2. Doppler and range rate
+### 1. Doppler and range rate
 
 Show the satellite's radial velocity relative to the ground station, and the
 Doppler shift it implies for a configured frequency (e.g. the ISS's
@@ -81,19 +60,19 @@ public and needs no auth; records carry `downlink_low`, `mode`, `baud`,
 transmitters with different modes and liveness — so the lookup has to end in a
 choice rather than a `matches[0]`. That is the same shape as the satellite
 picker in `ui/mod.rs`, a working list-select popup over a search result set, so
-it is a matter of reusing it rather than building one — the same reuse idea 8
+it is a matter of reusing it rather than building one — the same reuse idea 7
 wants for places.
 
 Config stays the source of truth and stays hand-editable, which is what you want
 anyway when SatNOGS is wrong, out of date, or does not know the satellite.
 
-### 3. Multi-satellite map overlay
+### 2. Multi-satellite map overlay
 
 Draw every satellite in TRACKED on the map at once — the active one bright `◆`
 with its label, the rest dim `◇`. Turns the map from one object into a small
 constellation view.
 
-The most structural of these four. `AppData.tle` is a single `Source<Tracker>`
+The most structural of these. `AppData.tle` is a single `Source<Tracker>`
 and `switch_satellite` wipes it; this needs a map of NORAD id → `Source<Tracker>`
 and a `tle_task` that maintains several. The saving grace is the disk cache:
 `~/.cache/nadir/tle-<norad>.json` already holds an element set for every
@@ -110,7 +89,7 @@ markers probably want no labels at all below some width.
 
 ## Smaller features
 
-### 4. Headless pass export
+### 3. Headless pass export
 
 `nadir --passes 48h --json` (or `--ical`): compute upcoming passes, print, exit,
 no TUI. Makes nadir cron-able and pipe-able, and turns pass prediction into
@@ -121,7 +100,7 @@ Almost entirely `main.rs`. Everything but `main.rs` already sits behind
 `predict_passes` needs only a `Tracker` and a `GeoPoint`. With a warm TLE cache
 it works offline.
 
-### 5. Sun and Moon on the map
+### 4. Sun and Moon on the map
 
 `solar::subsolar_point` is computed for the terminator and night wash but never
 drawn; marking it `☀` is a couple of lines. The Moon is more interesting and
@@ -136,7 +115,7 @@ existing naked-eye flag in Passes.
 Touches: a new `orbit/lunar.rs` (pure math, no I/O — the rule holds),
 `ui/map.rs`, possibly `ui/panels/passes.rs`.
 
-### 6. Pass alerts
+### 5. Pass alerts
 
 A terminal bell and a toast overlay some minutes before a visible pass rises,
 with the lead time in `config.toml`. `predict_passes` already runs every 20 s
@@ -146,7 +125,7 @@ support it, for free.
 
 Touches: `app.rs` (render loop), `ui/mod.rs` (the toast), `config.rs`.
 
-### 7. Configurable minimum elevation and horizon mask
+### 6. Configurable minimum elevation and horizon mask
 
 `MIN_PEAK_ELEVATION_DEG = 10.0` is a hardcoded constant in `orbit/passes.rs`.
 A station in a valley, or behind a building, or a dish user who cares about 5°,
@@ -157,7 +136,7 @@ pairs, interpolated) is the honest version and still small.
 Touches: `orbit/passes.rs` (threshold becomes a parameter), `config.rs`,
 `app.rs` (`refresh_passes` passes it through).
 
-### 8. A place picker for `--location`
+### 7. A place picker for `--location`
 
 Satellites get a picker; places do not. `api/geocode.rs` hardcodes `count=1`
 and takes whatever Open-Meteo ranks first, and the README documents the
@@ -169,7 +148,7 @@ The satellite picker in `ui/mod.rs` is already a working list-select popup over
 a search result set, so both cases are a matter of reusing it rather than
 building one. Raise `count`, show the matches, let the user choose.
 
-### 9. An activity log panel
+### 8. An activity log panel
 
 `AppData::log` retains 200 entries. Exactly 8 of them are ever visible, at the
 bottom of the `?` overlay, where nobody looks. Every fetch failure, throttle,
@@ -181,7 +160,7 @@ legible.
 Adding it as a seventh `Panel::ALL` entry means the `1`–`6` key pattern widens
 to `1`–`7`, plus the three prose places CLAUDE.md names.
 
-### 10. Cache hygiene
+### 9. Cache hygiene
 
 `cache.rs` has no eviction and no size limit. Every satellite ever tracked
 leaves a permanent `tle-<norad>.json` in `~/.cache/nadir/`. They are small, so
@@ -195,8 +174,8 @@ From `CLAUDE.md`, repeated here so a future session does not have to rediscover
 them:
 
 - **No I/O below `orbit/`.** That is what makes the math testable without a
-  network or a terminal, and it is why the headless-export and sky-plot ideas
-  are cheap in the first place.
+  network or a terminal, and it is why the headless-export idea is cheap in the
+  first place.
 - **The refresh intervals are deliberate.** 12 h for TLEs, 5/15/30 min for
   weather, aurora and launches. Launch Library's anonymous tier is ~15 requests
   an hour and `api::launches::rate_guard()` budgets 8. Do not shorten an

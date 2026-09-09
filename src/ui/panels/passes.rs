@@ -2,7 +2,7 @@
 //! ground station.
 
 use chrono::{DateTime, Duration, FixedOffset, Local, Utc};
-use ratatui::layout::{Constraint, Layout, Rect};
+use ratatui::layout::Rect;
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{List, ListItem, ListState, Paragraph, Wrap};
@@ -10,8 +10,8 @@ use ratatui::Frame;
 
 use crate::app::{App, Panel};
 use crate::orbit::{Confidence, Pass, SatState, Tracker};
-use crate::ui::panels::fmt::{compass, dim, row_highlight, station_label};
-use crate::ui::{is_focused, panel_block, Theme};
+use crate::ui::panels::fmt::{compass, dim, row_highlight, split_footer, station_label};
+use crate::ui::{is_focused, panel_block, Theme, PANEL_CHROME};
 
 pub fn draw(
     frame: &mut Frame,
@@ -102,14 +102,7 @@ pub fn draw(
     let footer = pass_accuracy_footer(sat, passes);
     let inner = block.inner(area);
     frame.render_widget(block, area);
-    let (list_area, footer_area) = match footer {
-        Some(_) => {
-            let [l, f] =
-                Layout::vertical([Constraint::Min(1), Constraint::Length(1)]).areas(inner);
-            (l, Some(f))
-        }
-        None => (inner, None),
-    };
+    let (list_area, footer_area) = split_footer(inner, footer.is_some());
 
     let selected = focused.then(|| app.list_pos.min(passes.len().saturating_sub(1)));
     let list = List::new(items)
@@ -162,10 +155,7 @@ fn pass_accuracy_footer(
 /// entirely.
 fn passes_title(app: &App, width: u16) -> String {
     const BASE: &str = "NEXT PASSES";
-    // panel_block's fixed overhead around the title text: " {key} " (3
-    // cols) + the trailing space after the title (1) + two border columns.
-    const CHROME: usize = 6;
-    let extras_budget = (width as usize).saturating_sub(CHROME + BASE.chars().count());
+    let extras_budget = (width as usize).saturating_sub(PANEL_CHROME + BASE.chars().count());
 
     let offset_part = format!(" · {}", utc_offset_label(Local::now().offset()));
     let show_offset = extras_budget >= offset_part.chars().count();

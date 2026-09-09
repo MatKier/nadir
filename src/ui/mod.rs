@@ -1,5 +1,6 @@
 //! Rendering. `draw` is the single entry point called once per frame.
 
+mod canvas;
 mod help;
 mod map;
 mod panels;
@@ -34,6 +35,12 @@ impl Theme {
     pub const ALERT: Color = Color::Rgb(240, 120, 120);
     pub const ACCENT: Color = Color::Rgb(120, 200, 240);
     pub const SAT: Color = Color::Rgb(255, 240, 150);
+    // A bright/dim pair carrying two related "then vs now" meanings: on the map
+    // the ground track ahead of the satellite (FUTURE) vs behind it (PAST); on
+    // the sky plot the stretch of a pass where the satellite is sunlit
+    // (FUTURE) vs in the Earth's shadow (PAST). Both readings want the same
+    // thing — one segment prominent, its counterpart receding — so they share
+    // the pair rather than spend two more of the palette's lanes.
     pub const TRACK_FUTURE: Color = Color::Rgb(120, 200, 240);
     pub const TRACK_PAST: Color = Color::Rgb(70, 100, 120);
     // The visibility footprint. It shared TRACK_FUTURE's blue back when it was
@@ -470,6 +477,12 @@ fn chip_text<T>(src: &crate::source::Source<T>) -> String {
         Health::Error(_) => "err".to_string(),
     }
 }
+
+/// Columns [`panel_block`] spends around the title text and can't give to it:
+/// the leading `" {key} "` (3) and the trailing space after the title (1),
+/// plus the two border columns. A panel that fits its own title to the pane
+/// width — NEXT PASSES, the sky plot — budgets against `width - PANEL_CHROME`.
+pub(in crate::ui) const PANEL_CHROME: usize = 6;
 
 /// A bordered block whose frame brightens when the panel holds focus. The
 /// title leads with `panel`'s own focus key (`1`–`6`), so it's obvious at a
