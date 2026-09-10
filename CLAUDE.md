@@ -81,8 +81,11 @@ that same value), and — if it is cached — `load_all_from_cache`.
 keys and the digit in each panel header; `key()` and `from_key()` both derive
 from array position and tests in `app.rs` enforce the round-trip. Reordering or
 adding a panel means editing `ALL` and nothing else on the key-binding side —
-but panel *numbers also appear in prose* in `src/ui/help.rs`, in the
-`status_bar` hint string and in README's key table. Update all three.
+but panel *numbers also appear in prose* in `src/ui/help.rs` and in README's key
+table; update both. The bottom-bar hint is focus-scoped in `ui::key_hints`: it
+no longer prints the `1`–`6` digits, but a panel key added there (like Tracked's
+`Enter`/`d` or Telemetry's `t`/`T`) needs a `match focus` arm so the bar
+advertises it.
 
 `ui::draw` is the sole render entry point, called every 250 ms by `render_loop`.
 It takes the `RwLock` read guard once per frame and drops it before drawing the

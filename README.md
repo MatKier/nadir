@@ -183,7 +183,10 @@ Focus affects behaviour as well as appearance. `j`/`k` scroll and highlight a ro
 in whichever panel has focus (Tracked, Passes and Launches have scrollable
 lists), and `r` refetches only what the focused panel shows — focusing Weather
 and pressing `r` forces a fresh Kp/aurora pull without spending one of the launch
-feed's limited requests. Highlighting a launch expands its row to a second line
+feed's limited requests. The bottom bar follows focus too: it shows the focused
+panel's own keys — the map keys under Map, `t`/`T` under Telemetry — rather than
+one crowded list, but every key stays bound from every panel regardless of what
+the bar is showing. Highlighting a launch expands its row to a second line
 with provider and pad, and marks the pad on the map with `◉` plus the provider,
 vehicle name, site and coordinates, for as long as the row stays highlighted.
 Highlighting a pass, likewise, turns the map pane into a sky plot of it — a

@@ -403,7 +403,7 @@ fn status_bar(frame: &mut Frame, area: Rect, app: &App, data: &crate::app::AppDa
     } else if app.show_help {
         vec!["j/k scroll · ? close".to_string(), "? close".to_string()]
     } else {
-        key_hints(app.focus)
+        key_hints(app.focus, app.map_fullscreen)
     };
 
     // Give the chips their measured width first; the key hints get whatever
@@ -424,34 +424,48 @@ fn status_bar(frame: &mut Frame, area: Rect, app: &App, data: &crate::app::AppDa
 
 /// The key hints for the current focus, widest variant first.
 ///
-/// The bottom bar is the only place a panel's own keys are advertised, so they
-/// are the last thing dropped as the terminal narrows: everything shed before
-/// them is either visible elsewhere (the `1`–`6` digits are in every panel
-/// header) or reachable from `?`, which is why `? help` is what survives to
-/// the very end.
-fn key_hints(focus: Panel) -> Vec<String> {
-    let scrollable = matches!(focus, Panel::Tracked | Panel::Passes | Panel::Launches);
-    let panel_keys: &[&str] = match focus {
-        Panel::Tracked => &["Enter track", "d remove"],
-        _ => &[],
+/// The bottom bar advertises only what the *focused* panel can do plus the
+/// handful of always-useful globals — the `1`–`6` digits and `Tab` are left to
+/// the panel headers, which show every panel's number all the time. A panel's
+/// own keys are the last thing dropped as the terminal narrows, because the bar
+/// is the only place they appear; everything shed before them is either visible
+/// elsewhere or reachable from `?`, which is why `? help` survives to the end.
+/// A fullscreen map counts as map focus — whatever holds focus underneath, the
+/// map is the only thing on screen.
+fn key_hints(focus: Panel, map_fullscreen: bool) -> Vec<String> {
+    // Two lengths of the focused panel's own keys: the wide list for the roomy
+    // tiers, the narrow one for the last tier before a bare `? help`. Spelling
+    // `j/k scroll` out per panel rather than deriving it from a `scrollable`
+    // flag is what lets Tracked shed it at the narrow tier while keeping its
+    // own two keys.
+    let map_keys: (&[&str], &[&str]) = (
+        &["m map", "f follow", "p places", "+/- zoom"],
+        &["m map", "f follow", "+/- zoom"],
+    );
+    let (wide, narrow): (&[&str], &[&str]) = if map_fullscreen {
+        map_keys
+    } else {
+        match focus {
+            Panel::Map => map_keys,
+            Panel::Tracked => (
+                &["j/k scroll", "Enter track", "d remove"],
+                &["Enter track", "d remove"],
+            ),
+            Panel::Telemetry => (&["t/T downlink"], &["t/T downlink"]),
+            Panel::Passes | Panel::Launches => (&["j/k scroll"], &["j/k scroll"]),
+            Panel::Weather => (&[], &[]),
+        }
     };
 
     let mut tiers: Vec<String> = [
-        &[
-            "1-6 focus", "Tab", "m map", "f follow", "p places", "+/- zoom", "s sat", "r refresh",
-            "space pause", ",/. warp", "g goto", "? help", "q quit",
-        ][..],
-        &["1-6 focus", "m map", "f follow", "r refresh", "? help", "q quit"][..],
-        &["r refresh", "? help", "q quit"][..],
-        &["? help"][..],
+        (wide, &["s sat", "r refresh", "space pause", ",/. warp", "g goto", "? help", "q quit"][..]),
+        (wide, &["s sat", "r refresh", "? help", "q quit"][..]),
+        (wide, &["r refresh", "? help", "q quit"][..]),
+        (narrow, &["? help"][..]),
     ]
     .into_iter()
-    .map(|globals| {
-        let mut parts: Vec<&str> = Vec::new();
-        if scrollable {
-            parts.push("j/k scroll");
-        }
-        parts.extend_from_slice(panel_keys);
+    .map(|(panel_keys, globals)| {
+        let mut parts: Vec<&str> = panel_keys.to_vec();
         parts.extend_from_slice(globals);
         parts.join(" · ")
     })
@@ -789,7 +803,7 @@ mod tests {
 
     #[test]
     fn tracked_hints_name_enter_and_d_at_every_width_that_shows_a_hint() {
-        let tiers = key_hints(Panel::Tracked);
+        let tiers = key_hints(Panel::Tracked, false);
         for width in NARROWEST_HINT_AREA..=200 {
             let Some(keys) = fitting_hint(&tiers, width) else { continue };
             if keys == "? help" {
@@ -801,16 +815,66 @@ mod tests {
     }
 
     #[test]
-    fn every_hint_tier_fits_the_width_it_was_chosen_for() {
+    fn telemetry_hints_the_downlink_keys_at_every_width_that_shows_a_hint() {
+        let tiers = key_hints(Panel::Telemetry, false);
+        for width in NARROWEST_HINT_AREA..=200 {
+            let Some(keys) = fitting_hint(&tiers, width) else { continue };
+            if keys == "? help" {
+                continue;
+            }
+            assert!(keys.contains("t/T downlink"), "width {width}: {keys}");
+        }
+    }
+
+    #[test]
+    fn map_keys_are_hinted_only_while_the_map_holds_focus() {
         for focus in Panel::ALL {
-            let tiers = key_hints(focus);
-            for width in 0..=200u16 {
-                let Some(keys) = fitting_hint(&tiers, width) else { continue };
-                assert!(
-                    keys.chars().count() < width as usize,
-                    "{focus:?} at width {width} chose a {}-column hint: {keys}",
-                    keys.chars().count(),
-                );
+            let widest = &key_hints(focus, false)[0];
+            assert_eq!(
+                widest.contains("m map"),
+                focus == Panel::Map,
+                "{focus:?}: {widest}",
+            );
+        }
+    }
+
+    #[test]
+    fn a_fullscreen_map_hints_the_map_keys_whatever_holds_focus() {
+        // `m` toggles fullscreen from any panel, so once the map fills the
+        // screen its keys are the relevant ones no matter what has focus.
+        let widest = &key_hints(Panel::Launches, true)[0];
+        assert!(widest.contains("m map"), "{widest}");
+        assert!(widest.contains("+/- zoom"), "{widest}");
+    }
+
+    #[test]
+    fn the_hint_bar_leaves_panel_digits_and_tab_to_the_panel_headers() {
+        // The whole point of the focus-scoped bar: `1`–`6` and `Tab` are shown
+        // permanently in the panel headers, so repeating them here only crowds
+        // out the keys that are advertised nowhere else.
+        for fullscreen in [false, true] {
+            for focus in Panel::ALL {
+                for tier in key_hints(focus, fullscreen) {
+                    assert!(!tier.contains("1-6"), "{focus:?} fs={fullscreen}: {tier}");
+                    assert!(!tier.contains("Tab"), "{focus:?} fs={fullscreen}: {tier}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn every_hint_tier_fits_the_width_it_was_chosen_for() {
+        for fullscreen in [false, true] {
+            for focus in Panel::ALL {
+                let tiers = key_hints(focus, fullscreen);
+                for width in 0..=200u16 {
+                    let Some(keys) = fitting_hint(&tiers, width) else { continue };
+                    assert!(
+                        keys.chars().count() < width as usize,
+                        "{focus:?} fs={fullscreen} at width {width} chose a {}-column hint: {keys}",
+                        keys.chars().count(),
+                    );
+                }
             }
         }
     }
@@ -819,7 +883,7 @@ mod tests {
     /// every ` · ` separator is a two-byte character one column wide.
     #[test]
     fn hint_tiers_are_measured_in_columns_not_bytes() {
-        let widest = key_hints(Panel::Tracked).remove(0);
+        let widest = key_hints(Panel::Tracked, false).remove(0);
         let columns = widest.chars().count();
         // Exactly wide enough for the hint and the trailing space, and no
         // wider — a byte-length check would reject this and show nothing.
@@ -830,17 +894,19 @@ mod tests {
 
     #[test]
     fn hint_tiers_get_shorter_and_always_offer_help() {
-        for focus in Panel::ALL {
-            let tiers = key_hints(focus);
-            for pair in tiers.windows(2) {
-                assert!(
-                    pair[0].chars().count() > pair[1].chars().count(),
-                    "{focus:?}: {:?} is not wider than {:?}",
-                    pair[0],
-                    pair[1],
-                );
+        for fullscreen in [false, true] {
+            for focus in Panel::ALL {
+                let tiers = key_hints(focus, fullscreen);
+                for pair in tiers.windows(2) {
+                    assert!(
+                        pair[0].chars().count() > pair[1].chars().count(),
+                        "{focus:?} fs={fullscreen}: {:?} is not wider than {:?}",
+                        pair[0],
+                        pair[1],
+                    );
+                }
+                assert!(tiers.iter().all(|t| t.contains("? help")), "{focus:?} fs={fullscreen}");
             }
-            assert!(tiers.iter().all(|t| t.contains("? help")), "{focus:?}");
         }
     }
 
