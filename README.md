@@ -141,6 +141,13 @@ tracked first, so returning to one does not mean searching again: highlight it
 and press `Enter`. `d` drops an entry; the satellite currently being tracked
 cannot be dropped.
 
+When a satellite is first tracked, nadir does a one-shot lookup on
+[SatNOGS DB](https://db.satnogs.org) for its downlink frequencies. Press `T` to
+choose one from what it found (or to look again); the choice is written under
+`[[tracked.transmitters]]` in `config.toml` and drives the `DOPP` telemetry
+row. It is never queried again — edit that block by hand when SatNOGS is wrong,
+out of date, or has no entry for the object.
+
 SGP4/SDP4 (via the `sgp4` crate, which implements both) covers all of Earth
 orbit, including geostationary. It does not cover deep space — an object at a
 Lagrange point such as JWST, or beyond Earth orbit, needs a different propagator
@@ -161,6 +168,8 @@ and will not work here.
 | `p` | toggle labelled cities and ground stations on the map |
 | `s` | search Celestrak's catalogue for another object, by name or NORAD id |
 | `r` | refresh the focused panel's feed(s) now |
+| `t` | step to the next configured downlink frequency (drives the `DOPP` row) |
+| `T` | pick a downlink for the tracked satellite, or look one up on SatNOGS DB |
 | `Space` | pause / resume the simulated clock |
 | `,` / `.` | step the clock speed down / up (1× … 1800×), past 1× into reverse (`<` / `>` too) |
 | `←` / `→` | step the clock ±1 minute (`h` / `l` too); `[` / `]` step ±1 hour |
@@ -216,7 +225,13 @@ period and inclination from the element set · `APSIS` perigee × apogee altitud
 measured from the WGS-84 equatorial radius rather than `ALT`'s local ellipsoid,
 so the two can read up to ~20 km apart away from the equator · `REV` approximate
 revolution number since launch · `SUN` sunlit/eclipsed and time to the next
-transition · `RANGE` slant range and elevation from your ground station · `TLE`
+transition · `RANGE` slant range and elevation from your ground station · `RATE`
+range rate ṙ in km/s — negative while the satellite closes, positive while it
+opens, zero at closest approach; the number that drives a rotator or an SDR
+correction loop · `DOPP` the configured downlink and the Doppler shift ṙ implies
+for it (`Δf = −f₀·ṙ/c`), shown once a frequency is on file — looked up once from
+SatNOGS DB when a satellite is first tracked (`T` to choose, `t` to step between
+them) and stored in `config.toml` thereafter · `TLE`
 time from the element-set epoch and the epoch itself (UTC), e.g.
 `18h since 09-06 23:11Z` — reads *before* instead of *since* when the clock is
 scrubbed ahead of the epoch · `ACC` a
@@ -266,6 +281,7 @@ All keyless; no account or API token is needed.
 | Source | Supplies |
 |---|---|
 | [Celestrak](https://celestrak.org) | TLE element sets, propagated locally with SGP4 |
+| [SatNOGS DB](https://db.satnogs.org) | Downlink frequencies — one-shot lookup when a satellite is first tracked, then read from `config.toml`; never polled |
 | [NOAA SWPC](https://www.swpc.noaa.gov) | K-index, solar wind, storm scales, aurora nowcast |
 | [Launch Library 2](https://thespacedevs.com) | Upcoming launches (rate-guarded client-side; falls back to the public test mirror, `lldev.thespacedevs.com`, when the primary host throttles) |
 | ipapi.co / ip-api.com | One-time IP geolocation on first run only |

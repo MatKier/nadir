@@ -117,3 +117,7 @@ easier to observe.
   use `Config::default()`, whose `path` is empty, and must not call `save()`.
 - User-facing documentation lives in two places that have to agree: `README.md`
   and the `?` overlay in `src/ui/help.rs`.
+- `Config::track` is called every frame by `App::sync_tracked_name`, and it
+  lifts the existing `TrackedSat` out and puts it back rather than rebuilding
+  it — any per-satellite field added to `TrackedSat` (like `transmitters`) must
+  be carried forward there or the render loop wipes it.

@@ -3,7 +3,10 @@
 use anyhow::{anyhow, Context, Result};
 use chrono::{DateTime, Utc};
 
-use crate::geo::{dot, ecef_to_geodetic, norm, split_at_antimeridian, teme_to_ecef, GeoPoint};
+use crate::geo::{
+    dot, ecef_to_geodetic, norm, split_at_antimeridian, teme_to_ecef, teme_velocity_to_ecef,
+    GeoPoint,
+};
 use crate::orbit::accuracy::{self, Accuracy};
 use crate::orbit::solar::{subsolar_point, sun_ecef_unit};
 
@@ -19,8 +22,17 @@ pub struct SatState {
     pub sub_point: GeoPoint,
     /// ECEF position in kilometres.
     pub ecef_km: [f64; 3],
+    /// ECEF velocity in km/s, *ground-relative* — the inertial SGP4 velocity
+    /// rotated into ECEF with the Earth-rotation term removed (see
+    /// [`crate::geo::teme_velocity_to_ecef`]). This is the vector a range rate
+    /// against a fixed ground station is built from; it is deliberately not the
+    /// same quantity as `speed_kms`, which stays the inertial magnitude.
+    pub vel_ecef_kms: [f64; 3],
     /// Speed relative to the rotating Earth is *not* what we report; this is the
-    /// inertial speed magnitude from SGP4, in km/s.
+    /// inertial speed magnitude from SGP4, in km/s. Frame-rotation invariant, so
+    /// it is still `norm(prediction.velocity)` even though `vel_ecef_kms` beside
+    /// it is not — and `Tracker::accuracy_at` depends on it being the inertial
+    /// figure.
     pub speed_kms: f64,
     /// Radius of the visibility footprint circle on the ground, in kilometres.
     pub footprint_km: f64,
@@ -436,6 +448,7 @@ impl Tracker {
         let ecef = teme_to_ecef(prediction.position, gmst);
         let sub_point = ecef_to_geodetic(ecef);
 
+        let vel_ecef_kms = teme_velocity_to_ecef(prediction.velocity, ecef, gmst);
         let speed_kms = norm(prediction.velocity);
 
         // Horizon geometry: half-angle subtended at Earth's centre by the circle
@@ -456,6 +469,7 @@ impl Tracker {
             time,
             sub_point,
             ecef_km: ecef,
+            vel_ecef_kms,
             speed_kms,
             footprint_km,
             sunlit,
@@ -566,6 +580,71 @@ mod tests {
         );
         // Footprint radius for a ~420 km orbit is a couple of thousand km.
         assert!((1500.0..=3000.0).contains(&st.footprint_km));
+    }
+
+    #[test]
+    fn range_rate_matches_a_finite_difference_of_the_slant_range() {
+        // The analytic ṙ (line-of-sight projection of the ECEF-relative
+        // velocity) has to agree with numerically differentiating the slant
+        // range `look_angles` reports. This single check catches a missed
+        // rotation, a wrong ω⊕ sign and a wrong ṙ sign at once, and it does so
+        // across a real pass — from below the horizon, through TCA, back below.
+        use crate::geo::{look_angles, range_rate};
+        let tr = tracker();
+        let station = crate::orbit::test_station();
+        let pass = &crate::orbit::test_passes()[0];
+        let delta = chrono::Duration::milliseconds(500);
+
+        let mut t = pass.aos;
+        while t <= pass.los {
+            let st = tr.state_at(t).expect("propagates mid-pass");
+            let analytic = range_rate(&station, st.ecef_km, st.vel_ecef_kms);
+
+            let r_plus = look_angles(&station, tr.state_at(t + delta).unwrap().ecef_km).range_km;
+            let r_minus = look_angles(&station, tr.state_at(t - delta).unwrap().ecef_km).range_km;
+            let numeric = (r_plus - r_minus) / (2.0 * 0.5);
+
+            assert!(
+                (analytic - numeric).abs() < 3e-3,
+                "at {t}: analytic {analytic:.6} vs finite-difference {numeric:.6} km/s"
+            );
+            t += chrono::Duration::seconds(30);
+        }
+    }
+
+    #[test]
+    fn range_rate_flips_sign_through_closest_approach() {
+        use crate::geo::range_rate;
+        let tr = tracker();
+        let station = crate::orbit::test_station();
+        let pass = &crate::orbit::test_passes()[0];
+
+        let rr_at = |t| {
+            let st = tr.state_at(t).unwrap();
+            range_rate(&station, st.ecef_km, st.vel_ecef_kms)
+        };
+        let before = rr_at(pass.peak - chrono::Duration::seconds(30));
+        let after = rr_at(pass.peak + chrono::Duration::seconds(30));
+        let at_peak = rr_at(pass.peak);
+
+        assert!(before < -1.0, "still approaching 30 s before peak: {before}");
+        assert!(after > 1.0, "already receding 30 s after peak: {after}");
+        // Peak elevation is closest approach to within a second or two for a
+        // LEO pass, so ṙ there is near the zero crossing, not out on either arm.
+        assert!(at_peak.abs() < before.abs().min(after.abs()), "ṙ at peak: {at_peak}");
+    }
+
+    #[test]
+    fn a_geostationary_satellite_barely_changes_its_range() {
+        // A near-stationary GEO has almost no radial motion relative to a fixed
+        // station — a fraction of the ~0.5 km/s a wrong Earth-rotation term
+        // would leave in.
+        use crate::geo::range_rate;
+        let tr = crate::orbit::test_geo_zero_drag_tracker();
+        let station = crate::orbit::test_station();
+        let st = tr.state_at(tr.epoch()).expect("GEO propagates at epoch");
+        let rr = range_rate(&station, st.ecef_km, st.vel_ecef_kms);
+        assert!(rr.abs() < 0.1, "GEO range rate {rr} km/s is too large");
     }
 
     #[test]

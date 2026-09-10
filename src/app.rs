@@ -1,6 +1,7 @@
 //! Application wiring: shared state, background fetch tasks, the input thread and
 //! the render loop.
 
+use std::collections::HashSet;
 use std::sync::{Arc, RwLock};
 use std::time::{Duration, Instant};
 
@@ -14,7 +15,7 @@ use crate::api::celestrak::SatMatch;
 use crate::api::launches::{Fetched, Launches};
 use crate::api::swpc::{AuroraGrid, Indices};
 use crate::cache::Cache;
-use crate::config::{Config, Intervals};
+use crate::config::{Config, Intervals, Transmitter};
 use crate::orbit::{predict_passes, Pass, Tracker};
 use crate::simclock::{ClockState, SimClock};
 use crate::source::Source;
@@ -100,6 +101,27 @@ pub enum SearchState {
     Failed { query: String, msg: String },
 }
 
+/// The state of the one-shot SatNOGS transmitter lookup — mirrors
+/// [`SearchState`]. Lives on [`AppData`] rather than [`App`] because a
+/// background task writes it. Every variant carries `norad_id` so a result
+/// that lands after the user has switched satellites can be discarded instead
+/// of written to the wrong entry — a real race, since the lookup is fired from
+/// `switch_satellite` and nothing stops a second switch a frame later.
+#[derive(Debug, Default, Clone)]
+pub enum TransmitterState {
+    /// Nothing requested, or a request was superseded.
+    #[default]
+    Idle,
+    /// A lookup for `norad_id` is in flight.
+    Busy { norad_id: u64 },
+    /// `norad_id` returned `found` — possibly empty, meaning SatNOGS has no
+    /// transmitter on file, the normal answer for a non-amateur payload.
+    Done { norad_id: u64, found: Vec<Transmitter> },
+    /// The lookup for `norad_id` failed outright (a network error, or
+    /// `--offline`), with a message to show in the picker.
+    Failed { norad_id: u64, msg: String },
+}
+
 /// All fetched, shared state. Written by background tasks, read by the renderer.
 #[derive(Default)]
 pub struct AppData {
@@ -108,6 +130,9 @@ pub struct AppData {
     pub aurora: Source<AuroraGrid>,
     pub launches: Source<Launches>,
     pub search: SearchState,
+    /// Result of the one-shot SatNOGS transmitter lookup, shown by the `T`
+    /// picker. Not a `Source<T>`: it is a one-off, not a feed.
+    pub tx_lookup: TransmitterState,
     pub log: Vec<String>,
 }
 
@@ -125,6 +150,14 @@ impl AppData {
 #[derive(Debug, Default)]
 pub struct SatPicker {
     pub query: String,
+    pub selected: usize,
+}
+
+/// State of the open transmitter picker (`T`). No query field: unlike the
+/// satellite picker this is a choice from a list already in hand
+/// ([`AppData::tx_lookup`]), not a search.
+#[derive(Debug, Default)]
+pub struct TxPicker {
     pub selected: usize,
 }
 
@@ -163,6 +196,8 @@ pub struct App {
     pub clock: SimClock,
     /// `Some` while the "track satellite" popup is open.
     pub sat_input: Option<SatPicker>,
+    /// `Some` while the transmitter picker (`T`) is open.
+    pub tx_input: Option<TxPicker>,
     /// `Some` while the "go to time" prompt is open.
     pub time_input: Option<TimeInput>,
     pub passes: Vec<Pass>,
@@ -175,6 +210,16 @@ pub struct App {
     /// (nothing listening) in `--offline` mode, where submission is handled
     /// locally instead.
     search_tx: watch::Sender<String>,
+    /// Submits a NORAD id to the SatNOGS transmitter-lookup task. Like
+    /// `search_tx`, a no-op send in `--offline` mode — `request_transmitters`
+    /// writes the refusal directly there instead. `0` is the "nothing
+    /// requested" sentinel the task skips.
+    tx_lookup_tx: watch::Sender<u64>,
+    /// NORAD ids a transmitter lookup has already been fired for this session.
+    /// Session-scoped, not persisted: a satellite gaining a SatNOGS entry is a
+    /// normal event, so "we looked and found nothing" self-heals on restart
+    /// rather than needing a way to clear a stored flag.
+    looked_up: HashSet<u64>,
     notifiers: Notifiers,
     /// Position within whichever list the focused panel shows (tracked
     /// satellites, passes, or the Launches panel). Reset whenever focus moves
@@ -385,6 +430,35 @@ impl App {
             return;
         }
 
+        // The transmitter picker: a scroll-and-choose list over the SatNOGS
+        // lookup result, no text field. Sits between the satellite picker and
+        // the time prompt in the same "at most one modal takes input" chain.
+        if let Some(picker) = self.tx_input.as_mut() {
+            match key.code {
+                KeyCode::Up | KeyCode::Char('k') => {
+                    picker.selected = picker.selected.saturating_sub(1)
+                }
+                KeyCode::Down | KeyCode::Char('j') => {
+                    let len = self
+                        .data
+                        .read()
+                        .ok()
+                        .and_then(|d| match &d.tx_lookup {
+                            TransmitterState::Done { found, .. } => Some(found.len()),
+                            _ => None,
+                        })
+                        .unwrap_or(0);
+                    if len > 0 {
+                        picker.selected = (picker.selected + 1).min(len - 1);
+                    }
+                }
+                KeyCode::Enter => self.submit_tx_input(),
+                KeyCode::Esc => self.tx_input = None,
+                _ => {}
+            }
+            return;
+        }
+
         // The go-to-time prompt swallows its keys too. After the satellite
         // picker (which eats every printable char) and before the help overlay,
         // so at most one modal is ever taking input.
@@ -456,6 +530,13 @@ impl App {
                 self.remove_tracked()
             }
             KeyCode::Char('r') => self.refresh_focused(),
+
+            // Doppler: `t` steps through the tracked satellite's configured
+            // downlinks (held down with a long list), `T` opens the picker to
+            // choose or re-run the SatNOGS lookup. Global, not panel-scoped —
+            // you want to cycle while watching the map.
+            KeyCode::Char('t') => self.cycle_transmitter(),
+            KeyCode::Char('T') => self.open_transmitter_picker(),
 
             // Time scrubbing. The displayed clock only; feed ages and the
             // status chips stay on wall time. `<`/`>` and `h`/`l` are the
@@ -542,6 +623,24 @@ impl App {
             self.passes_at = None;
             self.passes_from = None;
             let _ = self.sat_tx.send(norad_id);
+
+            // First time this object has been tracked this session and it has
+            // no downlink frequencies on file: kick off the one-shot SatNOGS
+            // lookup in the background (a note tells the user `T` picks one).
+            // A satellite that already has transmitters, or one already looked
+            // up, never re-queries — the config is authoritative and SatNOGS
+            // is a small volunteer service. Startup `--sat` resolution and the
+            // first-run default go through `Config::track` directly, not here,
+            // so a fresh install makes no unasked-for request on frame one.
+            if self.config.transmitters(norad_id).is_empty()
+                && self.looked_up.insert(norad_id)
+                && !self.config.offline
+            {
+                if let Ok(mut d) = self.data.write() {
+                    d.tx_lookup = TransmitterState::Busy { norad_id };
+                }
+                let _ = self.tx_lookup_tx.send(norad_id);
+            }
         }
         // Persist the choice; ignore write errors (e.g. read-only home).
         let _ = self.config.save();
@@ -657,6 +756,106 @@ impl App {
             return;
         }
         let _ = self.search_tx.send(query);
+    }
+
+    /// Start a SatNOGS transmitter lookup for the tracked satellite unless one
+    /// is already in flight or already resolved for it. A `Failed` result is
+    /// retried. `--offline` records the hand-edit hint instead of sending,
+    /// exactly as `submit_search` does for its dead channel.
+    fn ensure_transmitter_lookup(&mut self) {
+        let sat = self.config.sat;
+        let fresh = self.data.read().ok().is_some_and(|d| match &d.tx_lookup {
+            TransmitterState::Busy { norad_id } | TransmitterState::Done { norad_id, .. } => {
+                *norad_id == sat
+            }
+            _ => false,
+        });
+        if fresh {
+            return;
+        }
+        self.looked_up.insert(sat);
+        if self.config.offline {
+            if let Ok(mut d) = self.data.write() {
+                d.tx_lookup = TransmitterState::Failed {
+                    norad_id: sat,
+                    msg: "frequency lookup needs network — add one under \
+                          [[tracked.transmitters]] in config.toml"
+                        .to_string(),
+                };
+            }
+            return;
+        }
+        if let Ok(mut d) = self.data.write() {
+            d.tx_lookup = TransmitterState::Busy { norad_id: sat };
+        }
+        let _ = self.tx_lookup_tx.send(sat);
+    }
+
+    /// `T`: open the transmitter picker, kicking off a lookup first if there
+    /// isn't a fresh result to show.
+    fn open_transmitter_picker(&mut self) {
+        self.ensure_transmitter_lookup();
+        self.tx_input = Some(TxPicker::default());
+    }
+
+    /// `Enter` in the transmitter picker: persist the highlighted downlink (and
+    /// the rest of the looked-up list with it) as this satellite's
+    /// transmitters, then close. A non-`Done`, empty, or stale-`norad_id`
+    /// result writes nothing — `Esc` and this then behave the same.
+    fn submit_tx_input(&mut self) {
+        let Some(picker) = self.tx_input.as_ref() else { return };
+        let selected = picker.selected;
+        let sat = self.config.sat;
+        let chosen = self.data.read().ok().and_then(|d| match &d.tx_lookup {
+            TransmitterState::Done { norad_id, found } if *norad_id == sat && !found.is_empty() => {
+                Some(found.clone())
+            }
+            _ => None,
+        });
+        if let Some(list) = chosen {
+            self.config.set_transmitters(sat, list, selected);
+            let _ = self.config.save();
+            if let (Ok(mut d), Some(t)) =
+                (self.data.write(), self.config.active_transmitter(sat))
+            {
+                d.note(format!(
+                    "Doppler: tuned to {:.3} MHz {}",
+                    t.downlink_hz as f64 / 1e6,
+                    t.mode
+                ));
+            }
+        }
+        self.tx_input = None;
+    }
+
+    /// `t`: step to the next configured downlink for the tracked satellite. A
+    /// no-op with zero or one on file, save for a note pointing at `T`.
+    fn cycle_transmitter(&mut self) {
+        let sat = self.config.sat;
+        match self.config.transmitters(sat).len() {
+            0 => {
+                if let Ok(mut d) = self.data.write() {
+                    d.note("no downlink frequencies on file — press T to look them up");
+                }
+                return;
+            }
+            1 => {
+                if let Ok(mut d) = self.data.write() {
+                    d.note("only one downlink frequency on file for this satellite");
+                }
+                return;
+            }
+            _ => {}
+        }
+        self.config.cycle_transmitter(sat);
+        let _ = self.config.save();
+        if let (Ok(mut d), Some(t)) = (self.data.write(), self.config.active_transmitter(sat)) {
+            d.note(format!(
+                "Doppler: tuned to {:.3} MHz {}",
+                t.downlink_hz as f64 / 1e6,
+                t.mode
+            ));
+        }
     }
 
     /// `Enter` on the TRACKED panel: start tracking whichever entry is
@@ -791,6 +990,9 @@ pub async fn run(mut config: Config) -> Result<()> {
     let data = Arc::new(RwLock::new(AppData::default()));
     let (sat_tx, sat_rx) = watch::channel(config.sat);
     let (search_tx, search_rx) = watch::channel(String::new());
+    // `0` is not a NORAD catalogue number; the task treats it as "nothing
+    // requested", the same way `search_task` skips an empty query.
+    let (tx_lookup_tx, tx_lookup_rx) = watch::channel(0u64);
     let notifiers = Notifiers::new();
 
     // Enforce the polling floors before anything reads an interval — including
@@ -815,7 +1017,16 @@ pub async fn run(mut config: Config) -> Result<()> {
             d.note("offline mode — showing cached data only");
         }
     } else {
-        spawn_fetch_tasks(&http, &cache, &data, intervals, sat_rx, search_rx, notifiers.clone());
+        spawn_fetch_tasks(
+            &http,
+            &cache,
+            &data,
+            intervals,
+            sat_rx,
+            search_rx,
+            tx_lookup_rx,
+            notifiers.clone(),
+        );
     }
 
     let (input_tx, input_rx) = mpsc::unbounded_channel();
@@ -837,12 +1048,15 @@ pub async fn run(mut config: Config) -> Result<()> {
         started: Instant::now(),
         clock: SimClock::new(),
         sat_input: None,
+        tx_input: None,
         time_input: None,
         passes: Vec::new(),
         passes_at: None,
         passes_from: None,
         sat_tx,
         search_tx,
+        tx_lookup_tx,
+        looked_up: HashSet::new(),
         notifiers,
         list_pos: 0,
     };
@@ -1099,6 +1313,7 @@ impl Feed<AuroraGrid> {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn spawn_fetch_tasks(
     http: &reqwest::Client,
     cache: &Cache,
@@ -1106,6 +1321,7 @@ fn spawn_fetch_tasks(
     intervals: Intervals,
     sat_rx: watch::Receiver<u64>,
     search_rx: watch::Receiver<String>,
+    tx_lookup_rx: watch::Receiver<u64>,
     notifiers: Notifiers,
 ) {
     // `Intervals` is `Copy` and nothing retunes it once the app is running
@@ -1116,6 +1332,7 @@ fn spawn_fetch_tasks(
     aurora_task(http.clone(), data.clone(), intervals.aurora, notifiers.aurora);
     launches_task(http.clone(), cache.clone(), data.clone(), intervals.launches, notifiers.launches);
     search_task(http.clone(), data.clone(), search_rx);
+    satnogs_task(http.clone(), data.clone(), tx_lookup_rx);
 }
 
 /// Resolve catalogue name searches submitted from the "track satellite"
@@ -1141,6 +1358,49 @@ fn search_task(http: reqwest::Client, data: Arc<RwLock<AppData>>, mut rx: watch:
                     Ok(results) => SearchState::Done { query, results },
                     Err(e) => SearchState::Failed { query, msg: short(&e) },
                 };
+            }
+        }
+    });
+}
+
+/// Resolve the one-shot SatNOGS transmitter lookup, fired from
+/// `switch_satellite` when a satellite with no downlinks on file is first
+/// tracked (or by the `T` key). Like `search_task` this is not a timer loop —
+/// it waits on a `watch` channel, so a burst of satellite switches only ever
+/// runs the latest. Nothing is persisted here: the result is written to
+/// `AppData` for the picker to show, and `App::submit_tx_input` writes the
+/// user's choice to the config.
+fn satnogs_task(http: reqwest::Client, data: Arc<RwLock<AppData>>, mut rx: watch::Receiver<u64>) {
+    tokio::spawn(async move {
+        while rx.changed().await.is_ok() {
+            let norad_id = *rx.borrow();
+            if norad_id == 0 {
+                continue;
+            }
+            if let Ok(mut d) = data.write() {
+                d.tx_lookup = TransmitterState::Busy { norad_id };
+                d.note(format!("looking up transmitters for NORAD {norad_id}"));
+            }
+            let result = api::satnogs::transmitters(&http, norad_id).await;
+            if let Ok(mut d) = data.write() {
+                match result {
+                    Ok(found) => {
+                        let n = found.len();
+                        d.note(match n {
+                            0 => format!("SatNOGS has no transmitter on file for NORAD {norad_id}"),
+                            _ => format!(
+                                "SatNOGS: {n} transmitter(s) for NORAD {norad_id} — \
+                                 press T to pick a Doppler frequency"
+                            ),
+                        });
+                        d.tx_lookup = TransmitterState::Done { norad_id, found };
+                    }
+                    Err(e) => {
+                        let msg = short(&e);
+                        d.note(format!("SatNOGS lookup failed: {msg}"));
+                        d.tx_lookup = TransmitterState::Failed { norad_id, msg };
+                    }
+                }
             }
         }
     });
@@ -1390,6 +1650,7 @@ mod tests {
     fn test_app(config: Config) -> App {
         let (sat_tx, _sat_rx) = watch::channel(config.sat);
         let (search_tx, _search_rx) = watch::channel(String::new());
+        let (tx_lookup_tx, _tx_lookup_rx) = watch::channel(0u64);
         App {
             config,
             data: Arc::new(RwLock::new(AppData::default())),
@@ -1404,12 +1665,15 @@ mod tests {
             started: Instant::now(),
             clock: SimClock::new(),
             sat_input: None,
+            tx_input: None,
             time_input: None,
             passes: Vec::new(),
             passes_at: None,
             passes_from: None,
             sat_tx,
             search_tx,
+            tx_lookup_tx,
+            looked_up: HashSet::new(),
             notifiers: Notifiers::new(),
             list_pos: 0,
         }

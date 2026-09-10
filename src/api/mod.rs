@@ -8,6 +8,7 @@ pub mod celestrak;
 pub mod geocode;
 pub mod geoip;
 pub mod launches;
+pub mod satnogs;
 pub mod swpc;
 
 use std::time::{Duration, Instant};
