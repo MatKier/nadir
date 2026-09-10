@@ -116,8 +116,11 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
         ])
         .areas(area);
 
-        let [map_area, right] =
-            Layout::horizontal([Constraint::Min(44), Constraint::Length(40)]).areas(main);
+        let [map_area, right] = Layout::horizontal([
+            Constraint::Min(MAP_FLOOR),
+            Constraint::Length(right_width(main.width)),
+        ])
+        .areas(main);
 
         // TRACKED only needs to be as tall as it's useful: two border rows
         // plus up to five entries. Telemetry's height depends on whether its
@@ -196,6 +199,25 @@ fn right_column_heights(total: u16, tracked_rows: u16, telem_h: u16) -> (u16, u1
     let tracked_h = tracked_rows.min(total.saturating_sub(telem_h).max(TRACKED_FLOOR)).min(total);
     let telem_h = telem_h.min(total.saturating_sub(tracked_h));
     (tracked_h, telem_h)
+}
+
+/// Columns the map keeps before the right column is allowed to grow: the
+/// `Constraint::Min` floor of the horizontal split, and the width the map's own
+/// contents were tuned against.
+const MAP_FLOOR: u16 = 44;
+
+/// Width of the right-hand column for a `total`-column main band. It floats
+/// between two bounds: 40 — the width it was fixed at before, so the TELEMETRY
+/// rows degrade to exactly their old wording at the 80-column minimum — and 54,
+/// whose 52 inner columns are the widest any telemetry row asks for (the full
+/// DOPP line, `f MHz  rx f MHz  ±k kHz  MODE`). Wider than that is just blank
+/// space in the panel, so the map keeps every column past 98.
+///
+/// At 80..=83 columns the ask (40) and the map's `Min(44)` floor still overlap;
+/// ratatui 0.30 ranks `Min` above `Length`, so the column is squeezed to 36
+/// there — identical to the old fixed `Length(40)` at that size.
+fn right_width(total: u16) -> u16 {
+    total.saturating_sub(MAP_FLOOR).clamp(40, 54)
 }
 
 /// The title-bar transport marker for the simulated clock, and whether the
@@ -906,6 +928,31 @@ mod tests {
                     );
                 }
                 assert!(tiers.iter().all(|t| t.contains("? help")), "{focus:?} fs={fullscreen}");
+            }
+        }
+    }
+
+    #[test]
+    fn the_right_column_widens_with_the_terminal_without_starving_the_map() {
+        // Pinned points: the 80-column minimum and just above it stay at the
+        // old fixed 40; the column reaches its 54 cap at 98 and holds there.
+        assert_eq!(right_width(80), 40);
+        assert_eq!(right_width(84), 40);
+        assert_eq!(right_width(90), 46);
+        assert_eq!(right_width(98), 54);
+        assert_eq!(right_width(200), 54);
+
+        for total in 80..=400u16 {
+            let right = right_width(total);
+            assert!((40..=54).contains(&right), "total {total}: right {right}");
+            // Once the ask no longer collides with the map's `Min` floor
+            // (total ≥ 84), the map keeps at least MAP_FLOOR columns.
+            if total >= MAP_FLOOR + 40 {
+                assert!(
+                    total - right >= MAP_FLOOR,
+                    "total {total}: right {right} leaves the map {}",
+                    total - right,
+                );
             }
         }
     }

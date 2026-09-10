@@ -147,7 +147,8 @@ fn pass_accuracy_footer(
 
 /// The NEXT PASSES panel title: the base title, plus the ground station's
 /// name and its UTC offset when there's room for them. The right column is
-/// only ~40 columns wide, so both are budgeted against what `panel_block`
+/// narrow — 40 columns at the 80-column minimum, up to 54 on a wide terminal
+/// (`ui::right_width`) — so both are budgeted against what `panel_block`
 /// actually leaves for the title rather than assumed to always fit — the
 /// offset (short, and the whole point of naming it here) is kept over the
 /// name when both can't fit, and the name shrinks to its first component

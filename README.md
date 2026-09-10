@@ -236,12 +236,14 @@ for it (`Δf = −f₀·ṙ/c`), shown once a frequency is on file — looked up
 SatNOGS DB when a satellite is first tracked (`T` to choose, `t` to step between
 them) and stored in `config.toml` thereafter · `TLE`
 time from the element-set epoch and the epoch itself (UTC), e.g.
-`18h since 09-06 23:11Z` — reads *before* instead of *since* when the clock is
-scrubbed ahead of the epoch · `ACC` a
+`18h since epoch 2026-09-06 23:11Z` — reads *before* instead of *since* when the
+clock is scrubbed ahead of the epoch · `ACC` a
 modelled position error and the along-track timing error it implies — see
-[Accuracy](#accuracy). The title bar also shows the satellite's
-COSPAR international designator next to its NORAD id, when the terminal is wide
-enough to fit it.
+[Accuracy](#accuracy). `RANGE`, `DOPP` and `TLE` spell themselves out in full on
+a wide terminal and shorten a rung at a time as the right column narrows — `TLE`
+down to `18h since 09-06 23:11Z`, then to a bare `18h old`. The title bar
+likewise shows the satellite's COSPAR international designator next to its NORAD
+id when the terminal is wide enough to fit it.
 
 **Map** — the whole world by default; `f` zooms to a window centred on the
 satellite, wrapping across the dateline to keep it dead centre. `+` / `-` step

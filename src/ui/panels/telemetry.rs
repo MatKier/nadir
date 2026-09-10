@@ -52,9 +52,11 @@ pub fn draw(
     now: DateTime<Utc>,
 ) {
     let block = panel_block(Panel::Telemetry, "TELEMETRY", is_focused(app, Panel::Telemetry));
-    // Computed once here rather than assumed to be 38: the RANGE and TLE rows
-    // both size themselves against the real inner width, so a narrower panel
-    // degrades its trailing text instead of clipping into the border.
+    // The right column's width floats with the terminal (`ui::right_width`, 40 to
+    // 54 columns), so this is measured every frame rather than assumed: the
+    // RANGE, DOPP and TLE rows each size their trailing text against it, spelling
+    // out in full when it is wide and degrading a rung at a time — never
+    // clipping into the border — when it is not.
     let inner_w = block.inner(area).width as usize;
     let mut rows: Vec<Line> = Vec::new();
 
@@ -187,9 +189,11 @@ pub fn draw(
 /// "18h before …" rather than a bare "-18h".
 ///
 /// The head (label plus the coarse age) is fixed; the tail takes the first form
-/// that fits from a shortest-fit ladder — the two-space set-off with the epoch,
-/// a single space, then a fallback to the old bare "old"/"ahead" wording once
-/// the timestamp no longer fits. The age itself is the last thing to go.
+/// that fits from a shortest-fit ladder — the epoch with its year and named
+/// ("since epoch 2026-09-06 23:11Z"), then the year-less "since 09-06 23:11Z"
+/// the row showed at 38 columns, then a fallback to the bare "old"/"ahead"
+/// wording once even that no longer fits. The age itself is the last thing
+/// to go.
 fn tle_row(age: Duration, epoch: DateTime<Utc>, budget: usize) -> Line<'static> {
     let color = if age.abs() > Duration::hours(72) {
         Theme::ALERT
@@ -200,8 +204,12 @@ fn tle_row(age: Duration, epoch: DateTime<Utc>, budget: usize) -> Line<'static> 
     };
     let behind = age >= Duration::zero();
     let age_num = fmt_dur_coarse(age.abs());
+    // The sign only picks the word: a backward scrub of the clock puts `now`
+    // before the epoch, so the row reads "18h before epoch …" rather than a
+    // bare "-18h".
     let (word, bare) = if behind { ("since", "old") } else { ("before", "ahead") };
-    let ts = epoch.format("%m-%d %H:%MZ");
+    let full = epoch.format("%Y-%m-%d %H:%MZ");
+    let short = epoch.format("%m-%d %H:%MZ");
 
     let head = vec![
         label("TLE"),
@@ -211,8 +219,9 @@ fn tle_row(age: Duration, epoch: DateTime<Utc>, budget: usize) -> Line<'static> 
     // count is the display width `Line::width` will measure.
     let room = budget.saturating_sub(head.iter().map(Span::width).sum::<usize>());
     let tail = [
-        format!("  {word} {ts}"),
-        format!(" {word} {ts}"),
+        format!("  {word} epoch {full}"),
+        format!("  {word} {short}"),
+        format!(" {word} {short}"),
         format!("  {bare}"),
     ]
     .into_iter()
@@ -327,6 +336,13 @@ fn fmt_mhz(hz: u64) -> String {
 /// kilohertz (a near-geostationary pass) is shown in hertz, because
 /// "+0.00 kHz" would read as an outright zero and hide the one number that
 /// makes the row worth having there.
+///
+/// The ladder is over the *whole* row, not just the tail: its top rung labels
+/// both frequencies with `MHz` and the received one with `rx`, and needs the
+/// panel at its full 52 inner columns to earn them. Every rung below is the
+/// exact wording the row showed before, so a narrow terminal is unchanged. The
+/// units sit above the rung that merely keeps the mode string so the ladder
+/// stays monotonic — each step down drops something and never adds it back.
 fn dopp_row(downlink_hz: u64, mode: &str, range_rate_kms: f64, budget: usize) -> Line<'static> {
     let shift_hz = crate::geo::doppler_shift_hz(downlink_hz as f64, range_rate_kms);
     let rx_mhz = (downlink_hz as f64 + shift_hz) / 1e6;
@@ -346,29 +362,32 @@ fn dopp_row(downlink_hz: u64, mode: &str, range_rate_kms: f64, budget: usize) ->
         format!("{khz:+.0}k")
     };
 
-    let head = vec![
-        label("DOPP"),
-        Span::styled(
-            format!("{:>VALUE_W$}", fmt_mhz(downlink_hz)),
-            Style::new().fg(Theme::VALUE),
-        ),
-    ];
-    let room = budget.saturating_sub(head.iter().map(Span::width).sum::<usize>());
-    // Longest first; `mode` may be absent, so its rung is conditional rather
-    // than a fixed slot that would leave a trailing space.
-    let with_mode = (!mode.is_empty()).then(|| format!("  → {rx_mhz:.4}  {shift}  {mode}"));
-    let tail = with_mode
-        .into_iter()
-        .chain([
-            format!("  → {rx_mhz:.4}  {shift}"),
-            format!("  → {rx_mhz:.4}  {short}"),
-            format!("  → {rx_mhz:.4}"),
-            format!("  {short}"),
-        ])
-        .find(|s| s.chars().count() <= room)
-        .unwrap_or_default();
+    let nominal = format!("{:>VALUE_W$}", fmt_mhz(downlink_hz));
+    let label_span = label("DOPP");
+    let head_w = label_span.width() + nominal.chars().count();
+    // `mode` may be absent; when it is, its `"  MODE"` set-off collapses to
+    // nothing rather than leaving a trailing space.
+    let m = if mode.is_empty() { String::new() } else { format!("  {mode}") };
 
-    let mut spans = head;
+    // `unit` rides in the same span as `nominal`, after the right-aligned digits
+    // — the shared value column is untouched, like ALT's trailing " km". Every
+    // glyph counted here is one column wide (ASCII plus `→`).
+    let (unit, tail) = [
+        (" MHz", format!("  rx {rx_mhz:.4} MHz  {shift}{m}")),
+        ("", format!("  → {rx_mhz:.4}  {shift}{m}")),
+        ("", format!("  → {rx_mhz:.4}  {shift}")),
+        ("", format!("  → {rx_mhz:.4}  {short}")),
+        ("", format!("  → {rx_mhz:.4}")),
+        ("", format!("  {short}")),
+    ]
+    .into_iter()
+    .find(|(unit, tail)| head_w + unit.chars().count() + tail.chars().count() <= budget)
+    .unwrap_or_default();
+
+    let mut spans = vec![
+        label_span,
+        Span::styled(format!("{nominal}{unit}"), Style::new().fg(Theme::VALUE)),
+    ];
     if !tail.is_empty() {
         spans.push(Span::styled(tail, Style::new().fg(Theme::VALUE)));
     }
@@ -514,7 +533,8 @@ mod tests {
     /// at any elevation, slant range or panel size.
     #[test]
     fn range_row_never_exceeds_the_width_it_is_given() {
-        for budget in 20..=48usize {
+        // Up to 54: the widest the right column ever gets (`ui::right_width`).
+        for budget in 20..=54usize {
             for e in -90..=90 {
                 for &r in &[400.0_f64, 7352.0, 42_164.0] {
                     let w = range_row(&look(e as f64, r), budget).width();
@@ -522,6 +542,13 @@ mod tests {
                 }
             }
         }
+    }
+
+    /// Given the room a wide terminal affords it (52 inner columns), the row
+    /// spells "below horizon" out in full rather than the clipped "below".
+    #[test]
+    fn range_row_spells_out_below_horizon_at_the_full_panel_width() {
+        assert!(line_text(&range_row(&look(-12.0, 7352.0), 52)).contains("below horizon"));
     }
 
     /// At the real inner width of the 40-column right column both states keep
@@ -549,7 +576,7 @@ mod tests {
     /// number cannot be shown at all, and the real panel is always 38 wide.
     #[test]
     fn rate_row_never_exceeds_the_width_it_is_given() {
-        for budget in 21..=48usize {
+        for budget in 21..=54usize {
             for &rr in &[-7.61_f64, -3.81, -0.004, 0.0, 0.004, 3.81, 7.61] {
                 let w = rate_row(rr, budget).width();
                 assert!(w <= budget, "rate {rr}, budget {budget}: width {w}");
@@ -578,7 +605,7 @@ mod tests {
     /// a mode string.
     #[test]
     fn dopp_row_never_exceeds_the_width_it_is_given() {
-        for budget in 21..=48usize {
+        for budget in 21..=54usize {
             for &hz in &[145_800_000_u64, 437_025_000, 2_400_000_000, 15_003_400_000] {
                 for &rr in &[-10.5_f64, -3.81, 0.0, 0.003, 3.81, 10.5] {
                     for mode in ["FM", ""] {
@@ -597,6 +624,18 @@ mod tests {
         let t = line_text(&dopp_row(145_800_000, "FM", -3.81, 38));
         assert!(t.contains("145.800"), "nominal missing: {t:?}");
         assert!(t.contains('k') || t.contains("Hz"), "no shift shown: {t:?}");
+    }
+
+    /// Given a wide terminal's 52 inner columns, the row's top rung earns its
+    /// unit labels: both frequencies in MHz, the received one marked `rx`, the
+    /// shift in the long `kHz` form, and the mode.
+    #[test]
+    fn dopp_row_names_its_units_at_the_full_panel_width() {
+        let t = line_text(&dopp_row(145_800_000, "FM", -3.81, 52));
+        assert_eq!(t.matches("MHz").count(), 2, "both frequencies should carry MHz: {t:?}");
+        assert!(t.contains("rx "), "received frequency should be labelled: {t:?}");
+        assert!(t.contains(" kHz"), "shift should be in the long kHz form: {t:?}");
+        assert!(t.contains("FM"), "mode should still be shown: {t:?}");
     }
 
     /// A near-geostationary pass: ṙ of a few m/s, a shift of a few hertz. It
@@ -618,7 +657,7 @@ mod tests {
     /// panel size.
     #[test]
     fn tle_row_never_exceeds_the_width_it_is_given() {
-        for budget in 20..=48usize {
+        for budget in 20..=54usize {
             for mins in [5_i64, 45, 90, 18 * 60, 47 * 60, 5 * 24 * 60] {
                 for age in [Duration::minutes(mins), Duration::minutes(-mins)] {
                     let w = tle_row(age, epoch(), budget).width();
@@ -657,5 +696,17 @@ mod tests {
         assert!(t.contains("18h"), "{t:?}");
         assert!(t.contains("old"), "{t:?}");
         assert!(!t.contains("09-06"), "{t:?}");
+    }
+
+    /// Given a wide terminal's 52 inner columns, the row names the epoch and
+    /// spells its year — reading "before epoch" when the clock is scrubbed past
+    /// the epoch.
+    #[test]
+    fn tle_row_names_the_epoch_year_at_the_full_panel_width() {
+        let behind = line_text(&tle_row(Duration::hours(18), epoch(), 52));
+        assert!(behind.contains("since epoch 2026-09-06 23:11Z"), "{behind:?}");
+
+        let ahead = line_text(&tle_row(Duration::hours(-18), epoch(), 52));
+        assert!(ahead.contains("before epoch 2026-09-06 23:11Z"), "{ahead:?}");
     }
 }
