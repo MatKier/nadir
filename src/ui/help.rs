@@ -170,10 +170,13 @@ fn content(app: &App) -> Vec<Line<'static>> {
     text(&mut l, "up once from SatNOGS DB when a satellite is first tracked — press T to");
     text(&mut l, "choose from what it returns, t to step between them — and stored in");
     text(&mut l, "config.toml, hand-editable, never polled again. Δf = -f0·ṙ/c: a closing");
-    text(&mut l, "pass shifts the received frequency up, so you tune above the nominal.");
+    text(&mut l, "pass shifts the received frequency up, so you tune above the nominal. A");
+    text(&mut l, "wide terminal labels both frequencies \"MHz\" and the received one \"rx\"; a");
+    text(&mut l, "narrow one drops those and the mode a step at a time.");
     row(&mut l, "TLE", "time from the element-set epoch — amber past 36h, red past 72h");
-    text(&mut l, "Names the epoch inline, e.g. \"18h since 09-06 23:11Z\" (UTC). Reads \"before\"");
-    text(&mut l, "instead of \"since\" when the clock is scrubbed ahead of the epoch.");
+    text(&mut l, "Names the epoch inline — \"18h since epoch 2026-09-06 23:11Z\" (UTC) on a wide");
+    text(&mut l, "terminal, shortening to \"18h since 09-06 23:11Z\" as the panel narrows. Reads");
+    text(&mut l, "\"before\" instead of \"since\" when the clock is scrubbed ahead of the epoch.");
     row(&mut l, "ACC", "modelled position error, and the along-track timing error it implies");
     text(&mut l, "Built from the element set's own drag term (B*) — re-propagated with B*");
     text(&mut l, "nudged 10% and the two positions differenced — floored by a per-regime");
