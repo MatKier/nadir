@@ -9,6 +9,11 @@ pub const WGS84_A_KM: f64 = 6378.137;
 pub const WGS84_F: f64 = 1.0 / 298.257_223_563;
 /// WGS-84 first eccentricity squared.
 pub const WGS84_E2: f64 = WGS84_F * (2.0 - WGS84_F);
+/// Earth's rotation rate, in radians per second (IERS mean value). The angular
+/// speed the ECEF frame turns at relative to an inertial one — needed to take a
+/// TEME velocity into a ground-relative ECEF velocity, see
+/// [`teme_velocity_to_ecef`].
+pub const EARTH_ROTATION_RAD_S: f64 = 7.292_115e-5;
 
 /// A point on or above the Earth's surface, in geodetic coordinates.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -103,6 +108,29 @@ pub fn teme_to_ecef(teme_km: [f64; 3], gmst_rad: f64) -> [f64; 3] {
     [x * cos_g + y * sin_g, -x * sin_g + y * cos_g, z]
 }
 
+/// Take a TEME *velocity* into ECEF. This is deliberately not just
+/// [`teme_to_ecef`] applied to a velocity: for a position the bare Z rotation
+/// is the whole story, but a velocity also has to shed the motion the rotating
+/// frame itself introduces.
+///
+/// Rotating `vel_teme_kms` by GMST gives the satellite's *inertial* velocity
+/// expressed on Earth-fixed axes. An observer bolted to the ground is not
+/// inertial — the frame turns under them at ω⊕ — so what they actually see is
+/// that vector minus `ω⊕ × r`, with `r` the satellite's ECEF position. With
+/// ω⊕ along +Z the cross product is `[-ω·y, ω·x, 0]`, so the correction adds
+/// `+ω·y` to x and `-ω·x` to y. Skipping it, or flipping its sign, leaves a
+/// spurious ~0.46 km/s (a point on the equator's rotation speed) baked into
+/// every range rate — the classic bug in hand-rolled tracker code.
+pub fn teme_velocity_to_ecef(
+    vel_teme_kms: [f64; 3],
+    ecef_km: [f64; 3],
+    gmst_rad: f64,
+) -> [f64; 3] {
+    let [vx, vy, vz] = teme_to_ecef(vel_teme_kms, gmst_rad);
+    let w = EARTH_ROTATION_RAD_S;
+    [vx + w * ecef_km[1], vy - w * ecef_km[0], vz]
+}
+
 /// Look angles from an observer to a target, both given in ECEF kilometres.
 #[derive(Debug, Clone, Copy)]
 pub struct LookAngles {
@@ -145,6 +173,45 @@ pub fn look_angles(observer: &GeoPoint, target_ecef_km: [f64; 3]) -> LookAngles 
         elevation_deg: elevation,
         range_km: range,
     }
+}
+
+/// Range rate ṙ between `observer` and a target, in km/s: positive while the
+/// range is opening (the target receding), negative while it is closing, and
+/// passing through zero exactly at closest approach — the sign flip that marks
+/// TCA on a pass.
+///
+/// `target_vel_ecef_kms` has to be the target's *ground-relative* velocity, the
+/// output of [`teme_velocity_to_ecef`]; the observer is fixed in ECEF and adds
+/// no velocity of its own, so ṙ is just that velocity projected onto the line
+/// of sight — `d̂ · v`, with `d` the same observer→target vector [`look_angles`]
+/// builds internally.
+pub fn range_rate(
+    observer: &GeoPoint,
+    target_ecef_km: [f64; 3],
+    target_vel_ecef_kms: [f64; 3],
+) -> f64 {
+    let obs = observer.to_ecef_km();
+    let d = [
+        target_ecef_km[0] - obs[0],
+        target_ecef_km[1] - obs[1],
+        target_ecef_km[2] - obs[2],
+    ];
+    let range = norm(d);
+    if range == 0.0 {
+        return 0.0;
+    }
+    dot(d, target_vel_ecef_kms) / range
+}
+
+/// The Doppler shift in hertz that a range rate of `range_rate_kms` (km/s) puts
+/// on a carrier transmitted at `rest_hz`: `Δf = −f₀ · ṙ / c`. The leading minus
+/// is why a *closing* target (negative ṙ) yields a *positive* shift — the
+/// received frequency rises as the satellite approaches. First-order form only;
+/// at orbital speeds the relativistic correction is parts in a billion.
+pub fn doppler_shift_hz(rest_hz: f64, range_rate_kms: f64) -> f64 {
+    /// Speed of light in km/s.
+    const C_KMS: f64 = 299_792.458;
+    -rest_hz * range_rate_kms / C_KMS
 }
 
 /// Dot product of two vectors.
@@ -326,6 +393,73 @@ mod tests {
         let la = look_angles(&obs, target);
         assert!((la.elevation_deg - 90.0).abs() < 1e-6, "{la:?}");
         assert!((la.range_km - 500.0).abs() < 1e-6, "{la:?}");
+    }
+
+    #[test]
+    fn teme_velocity_to_ecef_cancels_the_velocity_of_a_point_fixed_to_the_ground() {
+        // A point rigidly attached to the rotating Earth has, in the inertial
+        // TEME frame, exactly the velocity ω⊕ × r. Its *ground-relative*
+        // velocity is zero by definition, so the conversion has to return ~0 —
+        // this is the assertion a wrong sign on the ω⊕ term fails.
+        let w = EARTH_ROTATION_RAD_S;
+        for &gmst in &[0.0, 1.3, 4.7] {
+            let r_teme = [5000.0, -2500.0, 3200.0];
+            let r_ecef = teme_to_ecef(r_teme, gmst);
+            let v_teme = [-w * r_teme[1], w * r_teme[0], 0.0];
+            let v_ecef = teme_velocity_to_ecef(v_teme, r_ecef, gmst);
+            assert!(norm(v_ecef) < 1e-9, "gmst {gmst}: {v_ecef:?}");
+        }
+    }
+
+    #[test]
+    fn range_rate_of_a_target_climbing_the_local_vertical_equals_its_speed() {
+        // Straight up the geodetic normal, moving outward along it: the whole
+        // velocity is radial, so ṙ is the full speed and its sign is positive
+        // (opening). Built the same way as `zenith_target_has_ninety_degree_elevation`.
+        let obs = GeoPoint::new(10.0, 20.0, 0.0);
+        let lat = obs.lat_deg.to_radians();
+        let lon = obs.lon_deg.to_radians();
+        let up_hat = [lat.cos() * lon.cos(), lat.cos() * lon.sin(), lat.sin()];
+        let base = obs.to_ecef_km();
+        let target = [
+            base[0] + 500.0 * up_hat[0],
+            base[1] + 500.0 * up_hat[1],
+            base[2] + 500.0 * up_hat[2],
+        ];
+        let speed = 7.5;
+        let vel = [speed * up_hat[0], speed * up_hat[1], speed * up_hat[2]];
+        assert!((range_rate(&obs, target, vel) - speed).abs() < 1e-9);
+    }
+
+    #[test]
+    fn range_rate_of_a_target_moving_tangentially_is_zero() {
+        // Same zenith target, but the velocity is perpendicular to the line of
+        // sight (due east in the local frame): nothing of it is radial, so ṙ
+        // is zero.
+        let obs = GeoPoint::new(10.0, 20.0, 0.0);
+        let lat = obs.lat_deg.to_radians();
+        let lon = obs.lon_deg.to_radians();
+        let up_hat = [lat.cos() * lon.cos(), lat.cos() * lon.sin(), lat.sin()];
+        let east_hat = [-lon.sin(), lon.cos(), 0.0];
+        let base = obs.to_ecef_km();
+        let target = [
+            base[0] + 500.0 * up_hat[0],
+            base[1] + 500.0 * up_hat[1],
+            base[2] + 500.0 * up_hat[2],
+        ];
+        let vel = [7.5 * east_hat[0], 7.5 * east_hat[1], 7.5 * east_hat[2]];
+        assert!(range_rate(&obs, target, vel).abs() < 1e-9);
+    }
+
+    #[test]
+    fn a_closing_target_shifts_the_downlink_up() {
+        // 145.800 MHz, satellite approaching at 3.81 km/s (negative ṙ): the
+        // received carrier rises, by f₀·|ṙ|/c ≈ 1.85 kHz.
+        let shift = doppler_shift_hz(145_800_000.0, -3.81);
+        assert!(shift > 0.0, "closing target must shift up, got {shift}");
+        assert!((shift - 1853.0).abs() < 5.0, "{shift} Hz");
+        // And a receding target by the same rate is the mirror image.
+        assert!((doppler_shift_hz(145_800_000.0, 3.81) + shift).abs() < 1e-6);
     }
 
     use std::f64::consts::{PI, TAU};

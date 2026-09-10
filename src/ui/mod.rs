@@ -18,7 +18,7 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Clear, Paragraph, Wrap};
 use ratatui::Frame;
 
-use crate::app::{App, Panel, SearchState};
+use crate::app::{App, Panel, SearchState, TransmitterState};
 use crate::orbit::Pass;
 use crate::source::Health;
 
@@ -160,6 +160,16 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
 
     if let Some(picker) = &app.sat_input {
         sat_input_popup(frame, area, picker, &data.search);
+    }
+    if let Some(picker) = &app.tx_input {
+        transmitter_popup(
+            frame,
+            area,
+            picker,
+            &data.tx_lookup,
+            app.config.sat,
+            app.config.active_transmitter(app.config.sat),
+        );
     }
     if let Some(input) = &app.time_input {
         time_input_popup(frame, area, input);
@@ -377,6 +387,12 @@ fn status_bar(frame: &mut Frame, area: Rect, app: &App, data: &crate::app::AppDa
             "type a name or NORAD id · Enter search/track · ↑↓ select · Esc cancel".to_string(),
             "Enter search/track · ↑↓ select · Esc cancel".to_string(),
             "Enter search · Esc cancel".to_string(),
+        ]
+    } else if app.tx_input.is_some() {
+        vec![
+            "↑↓ select · Enter use this downlink · Esc cancel".to_string(),
+            "↑↓ select · Enter use · Esc cancel".to_string(),
+            "Enter use · Esc cancel".to_string(),
         ]
     } else if app.time_input.is_some() {
         vec![
@@ -628,6 +644,75 @@ fn sat_input_popup(frame: &mut Frame, area: Rect, picker: &crate::app::SatPicker
         Paragraph::new(lines).block(block).wrap(Wrap { trim: true }),
         popup,
     );
+}
+
+/// The `T` picker: choose which SatNOGS downlink drives the DOPP row. Shares
+/// only `centered`, `Clear` and the focus-frame block with `sat_input_popup`;
+/// the scroll-window arithmetic below is a deliberate second copy, because the
+/// two lists differ in what their rows show and where they come from
+/// (ui/mod.rs already keeps `time_input_popup` separate for the same reason).
+fn transmitter_popup(
+    frame: &mut Frame,
+    area: Rect,
+    picker: &crate::app::TxPicker,
+    lookup: &TransmitterState,
+    sat: u64,
+    active: Option<&crate::config::Transmitter>,
+) {
+    let popup = centered(area, 78, 13);
+    frame.render_widget(Clear, popup);
+    let block = Block::bordered()
+        .border_style(Style::new().fg(Theme::FRAME_FOCUS))
+        .title(format!(" downlink frequency — NORAD {sat} "));
+    let dim = |s: String| Line::from(Span::styled(s, Style::new().fg(Theme::LABEL)));
+    let alert = |s: String| Line::from(Span::styled(s, Style::new().fg(Theme::ALERT)));
+    let mut lines = vec![Line::from("")];
+
+    match lookup {
+        TransmitterState::Idle | TransmitterState::Busy { .. } => {
+            lines.push(dim("  looking up transmitters…".to_string()));
+        }
+        TransmitterState::Failed { msg, .. } => lines.push(alert(format!("  {msg}"))),
+        TransmitterState::Done { found, .. } if found.is_empty() => {
+            // The common answer for a non-amateur payload, so it gets real
+            // prose rather than a bare "no results".
+            lines.push(alert(format!("  SatNOGS has no transmitter on file for NORAD {sat}")));
+            lines.push(dim(
+                "  add one by hand under [[tracked.transmitters]] in config.toml".to_string(),
+            ));
+        }
+        TransmitterState::Done { found, .. } => {
+            let visible = (popup.height as usize).saturating_sub(2 + 1).max(1);
+            let selected = picker.selected.min(found.len().saturating_sub(1));
+            let start = selected
+                .saturating_sub(visible.saturating_sub(1))
+                .min(found.len().saturating_sub(visible));
+            for (i, t) in found.iter().enumerate().skip(start).take(visible) {
+                let is_selected = i == selected;
+                // `●` marks the one already driving the DOPP row — the same
+                // pairing of `▶`/`●` the TRACKED panel uses for its list.
+                let sel = if is_selected { "▶ " } else { "  " };
+                let act = if active == Some(t) { "●" } else { " " };
+                let style = if is_selected {
+                    panels::row_highlight()
+                } else {
+                    Style::new().fg(Theme::VALUE)
+                };
+                let mode = if t.mode.is_empty() { "—" } else { t.mode.as_str() };
+                lines.push(Line::from(Span::styled(
+                    format!(
+                        "{sel}{act} {:>9.3} MHz  {:<6} {}",
+                        t.downlink_hz as f64 / 1e6,
+                        mode,
+                        panels::truncate(&t.description, 44),
+                    ),
+                    style,
+                )));
+            }
+        }
+    }
+
+    frame.render_widget(Paragraph::new(lines).block(block).wrap(Wrap { trim: true }), popup);
 }
 
 /// The `g` prompt: a small centred box that takes a time or an offset. Shares

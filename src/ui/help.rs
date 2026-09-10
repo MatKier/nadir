@@ -76,6 +76,8 @@ fn content(app: &App) -> Vec<Line<'static>> {
     row(&mut l, "Enter", "on Tracked: start tracking the highlighted satellite");
     row(&mut l, "d", "on Tracked: drop the highlighted satellite from the list");
     row(&mut l, "r", "refresh the focused panel's feed(s) now");
+    row(&mut l, "t", "step to the next configured downlink (drives the DOPP row)");
+    row(&mut l, "T", "pick a downlink / look one up on SatNOGS DB for this satellite");
     row(&mut l, "?", "toggle this help");
     row(&mut l, "q / Esc", "quit (Esc closes this help first)");
     blank(&mut l);
@@ -157,6 +159,16 @@ fn content(app: &App) -> Vec<Line<'static>> {
     row(&mut l, "REV", "approximate revolution number since launch");
     row(&mut l, "SUN", "sunlit or eclipsed, and time to the next sunrise/sunset");
     row(&mut l, "RANGE", "slant range and elevation from your ground station");
+    row(&mut l, "RATE", "range rate ṙ — how fast the slant range is changing, km/s");
+    text(&mut l, "Negative while the satellite is closing, positive while it is opening;");
+    text(&mut l, "the zero crossing is the moment of closest approach. It is the quantity");
+    text(&mut l, "that drives an antenna rotator or an SDR Doppler-correction loop.");
+    row(&mut l, "DOPP", "the configured downlink and the Doppler shift ṙ puts on it");
+    text(&mut l, "Only shown once a downlink frequency is on file. The frequency is looked");
+    text(&mut l, "up once from SatNOGS DB when a satellite is first tracked — press T to");
+    text(&mut l, "choose from what it returns, t to step between them — and stored in");
+    text(&mut l, "config.toml, hand-editable, never polled again. Δf = -f0·ṙ/c: a closing");
+    text(&mut l, "pass shifts the received frequency up, so you tune above the nominal.");
     row(&mut l, "TLE", "time from the element-set epoch — amber past 36h, red past 72h");
     text(&mut l, "Names the epoch inline, e.g. \"18h since 09-06 23:11Z\" (UTC). Reads \"before\"");
     text(&mut l, "instead of \"since\" when the clock is scrubbed ahead of the epoch.");
@@ -259,6 +271,8 @@ fn content(app: &App) -> Vec<Line<'static>> {
     text(&mut l, "activity.");
     text(&mut l, "`r` refetches only the focused panel's feeds, without spending a");
     text(&mut l, "request on anything else.");
+    text(&mut l, "The SatNOGS downlink lookup has no chip: it is a one-shot on first");
+    text(&mut l, "track, not a feed, and config.toml is authoritative once it has run.");
     blank(&mut l);
 
     heading(&mut l, "Offline mode — how the position is known with no network");
@@ -279,7 +293,9 @@ fn content(app: &App) -> Vec<Line<'static>> {
     text(&mut l, "km after a week in low orbit — which the TELEMETRY panel's ACC row");
     text(&mut l, "estimates and the amber/red TLE age flags.");
     text(&mut l, "What can't be computed, and so goes stale or blank offline: space");
-    text(&mut l, "weather, aurora, and the launch manifest.");
+    text(&mut l, "weather, aurora, and the launch manifest. The SatNOGS downlink");
+    text(&mut l, "lookup also needs the network, but a downlink already in config.toml");
+    text(&mut l, "still drives DOPP offline — the Doppler shift itself is local math.");
     text(&mut l, "--offline makes zero network requests and loads the last cached");
     text(&mut l, "TLE, weather and launches, each labelled with its age. A");
     text(&mut l, "normal run warm-starts from that same cache while it fetches.");

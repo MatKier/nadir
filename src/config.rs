@@ -183,13 +183,44 @@ mod interval_str {
     }
 }
 
+/// One downlink a satellite is known to transmit on, seeded from a one-shot
+/// SatNOGS DB lookup when the satellite is first tracked and hand-editable
+/// thereafter. Config is the source of truth: SatNOGS is never queried again
+/// for a satellite that already has an entry, so a stale or wrong record is
+/// corrected here, not upstream.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Transmitter {
+    /// Downlink centre frequency in hertz. Integral because that is how SatNOGS
+    /// publishes it and because a float would round-trip through TOML with an
+    /// exponent nobody wants to hand-edit.
+    pub downlink_hz: u64,
+    /// Modulation as SatNOGS names it ("FM", "BPSK", "AFSK", …). May be empty
+    /// when the record does not carry one.
+    #[serde(default)]
+    pub mode: String,
+    /// SatNOGS's own human label, e.g. "Mode V/V FM (crew R2+3)". May be empty.
+    #[serde(default)]
+    pub description: String,
+}
+
 /// A satellite once tracked: its catalogue number and last known name, kept
 /// around so it can be picked from the TRACKED panel instead of searched for
-/// again.
+/// again — plus any downlink frequencies looked up for it.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct TrackedSat {
     pub norad_id: u64,
     pub name: String,
+    /// Index into `transmitters` of the one currently driving the DOPP row.
+    /// Clamped on read, so a hand-edited value past the end of the list (or a
+    /// list since shortened by a re-lookup) is harmless. Declared before
+    /// `transmitters` so it serialises as a scalar ahead of that array.
+    #[serde(default)]
+    pub active_transmitter: usize,
+    /// Downlinks on file for this object, from a one-shot SatNOGS lookup or a
+    /// hand edit. Empty until looked up — and legitimately still empty after,
+    /// since most non-amateur payloads have no SatNOGS entry at all.
+    #[serde(default)]
+    pub transmitters: Vec<Transmitter>,
 }
 
 /// User configuration, read from and written back to `config.toml`.
@@ -354,10 +385,68 @@ impl Config {
     /// Record a satellite as tracked, most recently (re)tracked first. An
     /// existing entry for the same object is updated in place and moved to
     /// the front, rather than duplicated.
+    ///
+    /// The existing entry is *lifted out and put back*, not rebuilt: everything
+    /// it carries beyond the name — the transmitter list and which one is
+    /// active — is per-satellite state a re-track must preserve.
+    /// `App::sync_tracked_name` calls this from the render loop the moment an
+    /// element set supplies the real catalogue name, so a fresh
+    /// `TrackedSat { norad_id, name, .. }` literal here would silently wipe a
+    /// SatNOGS lookup one frame after it landed.
     pub fn track(&mut self, norad_id: u64, name: impl Into<String>) {
         let name = name.into();
-        self.tracked.retain(|t| t.norad_id != norad_id);
-        self.tracked.insert(0, TrackedSat { norad_id, name });
+        let mut entry = match self.tracked.iter().position(|t| t.norad_id == norad_id) {
+            Some(i) => self.tracked.remove(i),
+            None => TrackedSat {
+                norad_id,
+                name: String::new(),
+                active_transmitter: 0,
+                transmitters: Vec::new(),
+            },
+        };
+        entry.name = name;
+        self.tracked.insert(0, entry);
+    }
+
+    /// The downlink frequencies on file for `norad_id`; empty if it is not
+    /// tracked or none have been looked up.
+    pub fn transmitters(&self, norad_id: u64) -> &[Transmitter] {
+        self.tracked
+            .iter()
+            .find(|t| t.norad_id == norad_id)
+            .map(|t| t.transmitters.as_slice())
+            .unwrap_or(&[])
+    }
+
+    /// The transmitter currently selected to drive the DOPP row, or `None` when
+    /// none are on file. A stored index past the end of the list clamps to the
+    /// last entry rather than blanking the row or panicking.
+    pub fn active_transmitter(&self, norad_id: u64) -> Option<&Transmitter> {
+        let t = self.tracked.iter().find(|t| t.norad_id == norad_id)?;
+        let i = t.active_transmitter.min(t.transmitters.len().checked_sub(1)?);
+        t.transmitters.get(i)
+    }
+
+    /// Replace the transmitter list for `norad_id` and set which one is active
+    /// (clamped to the new list). A no-op if the satellite is not tracked — it
+    /// always is when this is reached, since a lookup only runs for a tracked
+    /// satellite.
+    pub fn set_transmitters(&mut self, norad_id: u64, list: Vec<Transmitter>, active: usize) {
+        if let Some(t) = self.tracked.iter_mut().find(|t| t.norad_id == norad_id) {
+            t.active_transmitter = active.min(list.len().saturating_sub(1));
+            t.transmitters = list;
+        }
+    }
+
+    /// Advance the active transmitter to the next in the list, wrapping. A
+    /// no-op with fewer than two on file. Returns the now-active one so the
+    /// caller can name it in a log line.
+    pub fn cycle_transmitter(&mut self, norad_id: u64) -> Option<&Transmitter> {
+        let t = self.tracked.iter_mut().find(|t| t.norad_id == norad_id)?;
+        if t.transmitters.len() >= 2 {
+            t.active_transmitter = (t.active_transmitter + 1) % t.transmitters.len();
+        }
+        t.transmitters.get(t.active_transmitter)
     }
 
     /// Remove a satellite from the tracked list. Returns `false` if it wasn't
@@ -410,7 +499,92 @@ mod tests {
         c.track(20580, "HST");
         c.track(25544, "ISS (ZARYA)");
         assert_eq!(c.tracked.len(), 2, "re-tracking must not duplicate the entry");
-        assert_eq!(c.tracked[0], TrackedSat { norad_id: 25544, name: "ISS (ZARYA)".to_string() });
+        assert_eq!(c.tracked[0].norad_id, 25544);
+        assert_eq!(c.tracked[0].name, "ISS (ZARYA)");
+    }
+
+    fn tx(hz: u64, mode: &str) -> Transmitter {
+        Transmitter { downlink_hz: hz, mode: mode.to_string(), description: String::new() }
+    }
+
+    #[test]
+    fn track_preserves_the_transmitters_already_recorded_for_a_satellite() {
+        // The regression guard for the render-loop clobber: `sync_tracked_name`
+        // calls `track()` every time the catalogue name changes, and it must
+        // not throw away a lookup result.
+        let mut c = Config::default();
+        c.track(25544, "NORAD 25544");
+        c.set_transmitters(25544, vec![tx(145_800_000, "FM"), tx(437_800_000, "FSK")], 1);
+        c.track(25544, "ISS (ZARYA)");
+        assert_eq!(c.transmitters(25544).len(), 2, "list survived the re-track");
+        assert_eq!(c.active_transmitter(25544).map(|t| t.downlink_hz), Some(437_800_000));
+        assert_eq!(c.tracked[0].name, "ISS (ZARYA)");
+    }
+
+    #[test]
+    fn transmitters_nested_in_a_tracked_entry_round_trip_through_toml() {
+        let mut c = Config::default();
+        c.track(25544, "ISS (ZARYA)");
+        c.set_transmitters(
+            25544,
+            vec![tx(145_800_000, "FM"), tx(437_800_000, "FSK"), tx(2_265_000_000, "QPSK")],
+            2,
+        );
+        c.track(20580, "HST"); // a second entry, with no transmitters
+        let text = toml::to_string_pretty(&c).unwrap();
+        let back: Config = toml::from_str(&text).unwrap();
+        assert_eq!(back.tracked, c.tracked);
+    }
+
+    #[test]
+    fn a_tracked_entry_without_a_transmitter_list_still_loads() {
+        // The format written before this field existed.
+        let c: Config =
+            toml::from_str("[[tracked]]\nnorad_id = 25544\nname = \"ISS (ZARYA)\"\n").unwrap();
+        assert!(c.transmitters(25544).is_empty());
+        assert_eq!(c.tracked[0].active_transmitter, 0);
+    }
+
+    #[test]
+    fn an_out_of_range_active_index_clamps_to_the_last_transmitter() {
+        let mut c = Config::default();
+        c.track(25544, "ISS (ZARYA)");
+        c.set_transmitters(25544, vec![tx(145_800_000, "FM"), tx(437_800_000, "FSK")], 0);
+        // Simulate a hand edit that points past the end.
+        c.tracked[0].active_transmitter = 9;
+        assert_eq!(c.active_transmitter(25544).map(|t| t.downlink_hz), Some(437_800_000));
+    }
+
+    #[test]
+    fn active_transmitter_is_none_when_none_are_on_file() {
+        let mut c = Config::default();
+        c.track(25544, "ISS (ZARYA)");
+        assert!(c.active_transmitter(25544).is_none());
+    }
+
+    #[test]
+    fn cycle_transmitter_wraps_and_refuses_a_list_of_one() {
+        let mut c = Config::default();
+        c.track(25544, "ISS (ZARYA)");
+        c.set_transmitters(25544, vec![tx(1, "A")], 0);
+        c.cycle_transmitter(25544);
+        assert_eq!(c.tracked[0].active_transmitter, 0, "one entry: nothing to cycle to");
+
+        c.set_transmitters(25544, vec![tx(1, "A"), tx(2, "B"), tx(3, "C")], 0);
+        c.cycle_transmitter(25544);
+        assert_eq!(c.tracked[0].active_transmitter, 1);
+        c.cycle_transmitter(25544);
+        c.cycle_transmitter(25544);
+        assert_eq!(c.tracked[0].active_transmitter, 0, "wraps back to the start");
+    }
+
+    #[test]
+    fn untrack_drops_the_transmitters_with_the_entry() {
+        let mut c = Config::default();
+        c.track(25544, "ISS (ZARYA)");
+        c.set_transmitters(25544, vec![tx(145_800_000, "FM")], 0);
+        assert!(c.untrack(25544));
+        assert!(c.transmitters(25544).is_empty(), "no orphaned transmitter rows");
     }
 
     #[test]

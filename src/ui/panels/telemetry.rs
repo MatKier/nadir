@@ -8,7 +8,7 @@ use ratatui::widgets::Paragraph;
 use ratatui::Frame;
 
 use crate::app::{App, Panel};
-use crate::geo::{look_angles, LookAngles};
+use crate::geo::{look_angles, range_rate, LookAngles};
 use crate::orbit::{Confidence, SatState, Tracker};
 use crate::ui::panels::fmt::{dim, kv, label};
 use crate::ui::{is_focused, panel_block, Theme};
@@ -22,17 +22,25 @@ const VALUE_W: usize = 8;
 const ALWAYS_BODY_ROWS: u16 = 10;
 
 /// Height `draw` needs, including its two border rows. `ui::draw` sizes the
-/// panel from this rather than a constant because one row is conditional —
-/// RANGE needs a ground station — so a fixed height either wastes a row on
-/// most satellites or clips it once a ground station is configured. Keeping
-/// the count here means it moves with the row list instead of drifting out
-/// of sync with a constant over in `ui::mod`.
+/// panel from this rather than a constant because two rows are conditional —
+/// RANGE and RATE both need a ground station — so a fixed height either wastes
+/// rows on most satellites or clips them once a ground station is configured.
+/// Keeping the count here means it moves with the row list instead of drifting
+/// out of sync with a constant over in `ui::mod`.
 pub fn height(app: &App) -> u16 {
-    2 + body_rows(app.config.ground_station().is_some())
+    let has_gs = app.config.ground_station().is_some();
+    let has_tx = app.config.active_transmitter(app.config.sat).is_some();
+    2 + body_rows(has_gs, has_tx)
 }
 
-fn body_rows(has_ground_station: bool) -> u16 {
-    ALWAYS_BODY_ROWS + u16::from(has_ground_station)
+fn body_rows(has_ground_station: bool, has_transmitter: bool) -> u16 {
+    // RANGE and RATE are the pair that appears only with a ground station.
+    // DOPP needs one more thing on top — a configured downlink frequency —
+    // since a frequency with no observer to measure a shift against, or an
+    // observer with no frequency to shift, has nothing to show.
+    ALWAYS_BODY_ROWS
+        + 2 * u16::from(has_ground_station)
+        + u16::from(has_ground_station && has_transmitter)
 }
 
 pub fn draw(
@@ -113,9 +121,19 @@ pub fn draw(
                 },
             ]));
 
-            // Live look angle from the ground station, when one is configured.
+            // Live look angle and range rate from the ground station, when one
+            // is configured. RATE sits under RANGE because it is the derivative
+            // of the same slant range — ṙ is what actually drives a rotator or
+            // an SDR Doppler-correction loop, and its sign flip marks TCA. DOPP
+            // follows when a downlink frequency is also on file: it is that
+            // same ṙ turned into a frequency offset.
             if let Some(g) = app.config.ground_station() {
+                let rr = range_rate(&g, s.ecef_km, s.vel_ecef_kms);
                 rows.push(range_row(&look_angles(&g, s.ecef_km), inner_w));
+                rows.push(rate_row(rr, inner_w));
+                if let Some(tx) = app.config.active_transmitter(app.config.sat) {
+                    rows.push(dopp_row(tx.downlink_hz, &tx.mode, rr, inner_w));
+                }
             }
 
             rows.push(tle_row(tr.element_age(now), tr.epoch(), inner_w));
@@ -246,6 +264,117 @@ fn range_row(la: &LookAngles, budget: usize) -> Line<'static> {
     Line::from(spans)
 }
 
+/// The RATE row: range rate ṙ in km/s, sized to `budget` columns the same way
+/// `range_row` above is. The sign carries the meaning — negative is closing,
+/// positive is opening — and the trailing word restates it, degrading to a
+/// short form and then to nothing before the number itself is ever clipped.
+/// Within a few m/s of zero the satellite is at closest approach and the
+/// direction is about to reverse, so the row says "at TCA" rather than commit
+/// to a sign that will not last.
+fn rate_row(range_rate_kms: f64, budget: usize) -> Line<'static> {
+    // A small dead band around zero: below it the word would flicker between
+    // "closing" and "opening" every frame right at the culmination.
+    let (word, short, color) = if range_rate_kms < -0.01 {
+        ("closing", "closing", Theme::NOMINAL)
+    } else if range_rate_kms > 0.01 {
+        ("opening", "opening", Theme::LABEL)
+    } else {
+        ("at TCA", "TCA", Theme::NOMINAL)
+    };
+
+    let head = vec![
+        label("RATE"),
+        Span::styled(
+            format!("{range_rate_kms:>VALUE_W$.2} km/s"),
+            Style::new().fg(Theme::VALUE),
+        ),
+    ];
+    // Every glyph in the tail is one column wide (ASCII), so a `char` count is
+    // the display width `Line::width` measures — same reasoning as `range_row`.
+    let room = budget.saturating_sub(head.iter().map(Span::width).sum::<usize>());
+    let tail = [format!("  {word}"), format!(" {word}"), format!("  {short}")]
+        .into_iter()
+        .find(|s| s.chars().count() <= room)
+        .unwrap_or_default();
+
+    let mut spans = head;
+    if !tail.is_empty() {
+        spans.push(Span::styled(tail, Style::new().fg(color)));
+    }
+    Line::from(spans)
+}
+
+/// `hz` as megahertz in at most [`VALUE_W`] columns, with as many decimal
+/// places as fit — a shortest-fit ladder applied to a number. It happens to
+/// track the physics: at 145 MHz four decimals fit and the Doppler shift lives
+/// in the fourth (~kHz); at 15 GHz only one fits, which is all a ~400 kHz shift
+/// needs to be legible.
+fn fmt_mhz(hz: u64) -> String {
+    let mhz = hz as f64 / 1e6;
+    (0..=4)
+        .rev()
+        .map(|p| format!("{mhz:.p$}", p = p as usize))
+        .find(|s| s.chars().count() <= VALUE_W)
+        .unwrap_or_else(|| format!("{mhz:.0}"))
+}
+
+/// The DOPP row: the tracked satellite's configured downlink and the Doppler
+/// shift the current range rate puts on it. The nominal frequency is the fixed
+/// leading value (right-aligned into the shared column like every other row);
+/// the received frequency and the offset live in a shortest-fit tail that
+/// degrades — long "kHz" form, then a compact "k" form, then the received
+/// frequency alone — before the nominal is ever clipped. A shift under a
+/// kilohertz (a near-geostationary pass) is shown in hertz, because
+/// "+0.00 kHz" would read as an outright zero and hide the one number that
+/// makes the row worth having there.
+fn dopp_row(downlink_hz: u64, mode: &str, range_rate_kms: f64, budget: usize) -> Line<'static> {
+    let shift_hz = crate::geo::doppler_shift_hz(downlink_hz as f64, range_rate_kms);
+    let rx_mhz = (downlink_hz as f64 + shift_hz) / 1e6;
+    let khz = shift_hz / 1000.0;
+    let mode = mode.trim();
+
+    let shift = if khz.abs() < 1.0 {
+        format!("{shift_hz:+.0} Hz")
+    } else {
+        format!("{khz:+.2} kHz")
+    };
+    let short = if khz.abs() < 1.0 {
+        format!("{shift_hz:+.0}Hz")
+    } else if khz.abs() < 100.0 {
+        format!("{khz:+.1}k")
+    } else {
+        format!("{khz:+.0}k")
+    };
+
+    let head = vec![
+        label("DOPP"),
+        Span::styled(
+            format!("{:>VALUE_W$}", fmt_mhz(downlink_hz)),
+            Style::new().fg(Theme::VALUE),
+        ),
+    ];
+    let room = budget.saturating_sub(head.iter().map(Span::width).sum::<usize>());
+    // Longest first; `mode` may be absent, so its rung is conditional rather
+    // than a fixed slot that would leave a trailing space.
+    let with_mode = (!mode.is_empty()).then(|| format!("  → {rx_mhz:.4}  {shift}  {mode}"));
+    let tail = with_mode
+        .into_iter()
+        .chain([
+            format!("  → {rx_mhz:.4}  {shift}"),
+            format!("  → {rx_mhz:.4}  {short}"),
+            format!("  → {rx_mhz:.4}"),
+            format!("  {short}"),
+        ])
+        .find(|s| s.chars().count() <= room)
+        .unwrap_or_default();
+
+    let mut spans = head;
+    if !tail.is_empty() {
+        spans.push(Span::styled(tail, Style::new().fg(Theme::VALUE)));
+    }
+    Line::from(spans)
+}
+
 /// Time of the next sunlit/eclipsed flip after `from`, refined to
 /// sub-second precision. A coarse 30 s scan finds the window the flip falls
 /// in — cheap, and good enough to bound it — then a dozen bisections of that
@@ -319,6 +448,8 @@ mod tests {
             format!("{:>VALUE_W$}", 58409),            // REV
             format!("{:>VALUE_W$}", "sunlit"),         // SUN
             format!("{:>VALUE_W$.0}", 7352.0_f64),     // RANGE
+            format!("{:>VALUE_W$.2}", -3.81_f64),      // RATE
+            format!("{:>VALUE_W$}", fmt_mhz(145_800_000)), // DOPP
             format!("{:>VALUE_W$}", "18h"),            // TLE
             format!("{:>VALUE_W$}", "±2 km"),          // ACC
         ]
@@ -338,7 +469,15 @@ mod tests {
     /// apart silently.
     #[test]
     fn body_row_count_matches_the_rows_draw_can_emit() {
-        assert_eq!(body_rows(true) as usize, row_templates().len());
+        assert_eq!(body_rows(true, true) as usize, row_templates().len());
+    }
+
+    /// A downlink frequency with no ground station buys no DOPP row — there is
+    /// no range rate to shift it. Stated explicitly so the `&&` in `body_rows`
+    /// can't be loosened to a `+` with only the layout noticing.
+    #[test]
+    fn a_transmitter_without_a_ground_station_adds_no_doppler_row() {
+        assert_eq!(body_rows(false, true), body_rows(false, false));
     }
 
     #[test]
@@ -401,6 +540,72 @@ mod tests {
         let t = line_text(&range_row(&look(-12.0, 7352.0), 30));
         assert!(t.contains("-12°"), "{t:?}");
         assert!(!t.contains("below"), "{t:?}");
+    }
+
+    /// Like `range_row`, the RATE row is handed the width and must never exceed
+    /// it — at any range rate magnitude, sign or panel size. Its fixed head
+    /// (label plus the VALUE_W-aligned number plus " km/s") is 21 columns, one
+    /// more than `range_row`'s because of the "/s" on the unit; below that the
+    /// number cannot be shown at all, and the real panel is always 38 wide.
+    #[test]
+    fn rate_row_never_exceeds_the_width_it_is_given() {
+        for budget in 21..=48usize {
+            for &rr in &[-7.61_f64, -3.81, -0.004, 0.0, 0.004, 3.81, 7.61] {
+                let w = rate_row(rr, budget).width();
+                assert!(w <= budget, "rate {rr}, budget {budget}: width {w}");
+            }
+        }
+    }
+
+    /// At the real inner width of the 40-column right column the direction word
+    /// is kept, and the dead band around zero reads as "TCA".
+    #[test]
+    fn rate_row_names_the_direction_at_the_real_panel_width() {
+        assert!(line_text(&rate_row(-3.81, 38)).contains("closing"));
+        assert!(line_text(&rate_row(3.81, 38)).contains("opening"));
+        assert!(line_text(&rate_row(0.0, 38)).contains("TCA"));
+    }
+
+    #[test]
+    fn fmt_mhz_never_exceeds_the_shared_value_column() {
+        for hz in [100_000_u64, 145_800_000, 437_025_000, 2_400_000_000, 15_003_400_000, 30_000_000_000] {
+            assert!(fmt_mhz(hz).chars().count() <= VALUE_W, "{hz} -> {:?}", fmt_mhz(hz));
+        }
+    }
+
+    /// Like the RANGE and RATE rows, DOPP is handed the width and must never
+    /// exceed it — across VHF to Ku band, any range rate, and with or without
+    /// a mode string.
+    #[test]
+    fn dopp_row_never_exceeds_the_width_it_is_given() {
+        for budget in 21..=48usize {
+            for &hz in &[145_800_000_u64, 437_025_000, 2_400_000_000, 15_003_400_000] {
+                for &rr in &[-10.5_f64, -3.81, 0.0, 0.003, 3.81, 10.5] {
+                    for mode in ["FM", ""] {
+                        let w = dopp_row(hz, mode, rr, budget).width();
+                        assert!(w <= budget, "hz {hz}, rr {rr}, mode {mode:?}, budget {budget}: {w}");
+                    }
+                }
+            }
+        }
+    }
+
+    /// At the real 38-column panel width the nominal frequency and some form of
+    /// the shift both survive.
+    #[test]
+    fn dopp_row_keeps_the_shift_at_the_real_panel_width() {
+        let t = line_text(&dopp_row(145_800_000, "FM", -3.81, 38));
+        assert!(t.contains("145.800"), "nominal missing: {t:?}");
+        assert!(t.contains('k') || t.contains("Hz"), "no shift shown: {t:?}");
+    }
+
+    /// A near-geostationary pass: ṙ of a few m/s, a shift of a few hertz. It
+    /// must read in Hz, not as a rounded-to-zero "kHz".
+    #[test]
+    fn dopp_row_reads_in_hertz_when_the_shift_is_below_a_kilohertz() {
+        let t = line_text(&dopp_row(145_800_000, "FM", 0.003, 48));
+        assert!(t.contains("Hz"), "{t:?}");
+        assert!(!t.contains("kHz"), "sub-kHz shift should not read as kHz: {t:?}");
     }
 
     fn epoch() -> DateTime<Utc> {
