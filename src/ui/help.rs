@@ -64,6 +64,8 @@ fn content(app: &App) -> Vec<Line<'static>> {
     text(&mut l, "     each panel's header shows its own number, so the key to focus it");
     text(&mut l, "     is always visible");
     row(&mut l, "Tab", "cycle focus");
+    text(&mut l, "     the bottom bar advertises only the focused panel's own keys — the");
+    text(&mut l, "     map and time keys below still work from any panel");
     row(&mut l, "j / k", "scroll the focused list (tracked, passes, launches) or this help");
     row(&mut l, "PgUp / PgDn", "scroll this help by a page");
     row(&mut l, "Home / End", "jump to the top / bottom of this help");
