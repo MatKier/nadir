@@ -185,12 +185,18 @@ pub struct App {
     /// Whether the map draws its layer of prominent-place labels (the `p`
     /// key). Renderer state only — like `follow`/`zoom`, it isn't persisted.
     pub places: bool,
-    /// Whether the map draws the aurora oval (the `a` key). On by default —
-    /// unlike `places` it starts enabled, since it draws nothing until the
-    /// aurora feed has ever returned data and so can't clutter a fresh map
-    /// the way an always-on place layer would. Renderer state only, not
-    /// persisted.
+    /// Whether the map draws the aurora oval (the `a` key). Off by default,
+    /// like every other overlay — and force-hidden while the clock is
+    /// warping regardless of this flag, since the OVATION nowcast it draws
+    /// is a live snapshot on its own real-world schedule and doesn't track
+    /// the warped instant (see the read site in `ui::draw`). Renderer state
+    /// only, not persisted.
     pub aurora_overlay: bool,
+    /// Whether the map draws the Sun/Moon markers (the `o` key). Off by
+    /// default, like `places` — unlike the aurora wash it draws something
+    /// immediately on a fresh map, so it opts in rather than opting out.
+    /// Renderer state only, not persisted.
+    pub sun_moon: bool,
     pub show_help: bool,
     /// Scroll offset within the help overlay, in lines; clamped against its
     /// content height at render time.
@@ -517,6 +523,7 @@ impl App {
             KeyCode::Char('f') => self.follow = !self.follow,
             KeyCode::Char('p') => self.places = !self.places,
             KeyCode::Char('a') => self.aurora_overlay = !self.aurora_overlay,
+            KeyCode::Char('o') => self.sun_moon = !self.sun_moon,
             // `=`/`_` so the binding fires whether or not shift is held.
             KeyCode::Char('+') | KeyCode::Char('=') => self.zoom_in(),
             KeyCode::Char('-') | KeyCode::Char('_') => self.zoom_out(),
@@ -1051,7 +1058,8 @@ pub async fn run(mut config: Config) -> Result<()> {
         follow: false,
         zoom: 0,
         places: false,
-        aurora_overlay: true,
+        aurora_overlay: false,
+        sun_moon: false,
         show_help: false,
         help_scroll: 0,
         should_quit: false,
@@ -1669,7 +1677,8 @@ mod tests {
             follow: false,
             zoom: 0,
             places: false,
-            aurora_overlay: true,
+            aurora_overlay: false,
+            sun_moon: false,
             show_help: false,
             help_scroll: 0,
             should_quit: false,
@@ -1854,6 +1863,23 @@ mod tests {
         assert_eq!((app.follow, app.zoom), (follow, zoom), "`p` is orthogonal to the map view");
         press(&mut app, 'p');
         assert!(!app.places);
+    }
+
+    #[test]
+    fn a_and_o_toggle_the_aurora_and_sun_moon_overlays_independently_and_default_off() {
+        let mut app = test_app(Config::default());
+        assert!(!app.aurora_overlay, "the aurora wash is off until asked for");
+        assert!(!app.sun_moon, "the Sun/Moon markers are off until asked for");
+        press(&mut app, 'a');
+        assert!(app.aurora_overlay);
+        assert!(!app.sun_moon, "`a` doesn't touch the Sun/Moon toggle");
+        press(&mut app, 'o');
+        assert!(app.sun_moon);
+        assert!(app.aurora_overlay, "`o` doesn't touch the aurora toggle");
+        press(&mut app, 'a');
+        press(&mut app, 'o');
+        assert!(!app.aurora_overlay);
+        assert!(!app.sun_moon);
     }
 
     #[test]

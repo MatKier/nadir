@@ -81,6 +81,8 @@ impl Theme {
 /// Draw a whole frame. Takes `app` mutably only so the help overlay can
 /// clamp its own scroll offset against the content it just laid out.
 pub fn draw(frame: &mut Frame, app: &mut App) {
+    use crate::simclock::ClockState;
+
     let area = frame.area();
 
     if area.width < 80 || area.height < 24 {
@@ -110,8 +112,12 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
     let pad = selected_launch_pad(app, &data);
     // `None` unless the `a` key is on *and* the feed has ever returned a
     // grid — a failed or still-pending fetch just means no oval this frame,
-    // never a panic or a blank grid drawn as though it were real data.
-    let aurora = data.aurora.get().filter(|_| app.aurora_overlay);
+    // never a panic or a blank grid drawn as though it were real data. Also
+    // suppressed while the clock is warping: the OVATION nowcast is a
+    // real-world snapshot on its own schedule, not a function of `now`, so
+    // it stops meaning anything once the displayed instant isn't real time.
+    let warping = matches!(app.clock.state(), ClockState::Warp(_));
+    let aurora = data.aurora.get().filter(|_| app.aurora_overlay && !warping);
 
     if app.map_fullscreen {
         let [title, body, status] = Layout::vertical([
@@ -477,8 +483,8 @@ fn key_hints(focus: Panel, map_fullscreen: bool) -> Vec<String> {
     // flag is what lets Tracked shed it at the narrow tier while keeping its
     // own two keys.
     let map_keys: (&[&str], &[&str]) = (
-        &["m map", "f follow", "p places", "+/- zoom"],
-        &["m map", "f follow", "+/- zoom"],
+        &["m map", "f follow", "p places", "o sun/moon", "+/- zoom"],
+        &["m map", "f follow", "o sun/moon", "+/- zoom"],
     );
     let (wide, narrow): (&[&str], &[&str]) = if map_fullscreen {
         map_keys

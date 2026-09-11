@@ -75,6 +75,7 @@ fn content(app: &App) -> Vec<Line<'static>> {
     text(&mut l, "     widest level drops back to the whole world, + turns follow on");
     row(&mut l, "p", "toggle labelled cities and ground stations on the map");
     row(&mut l, "a", "toggle the aurora oval on the map");
+    row(&mut l, "o", "toggle the Sun/Moon markers on the map");
     row(&mut l, "s", "search Celestrak's catalogue for a satellite, by name or NORAD id");
     row(&mut l, "Enter", "on Tracked: start tracking the highlighted satellite");
     row(&mut l, "d / Del", "on Tracked: drop the highlighted satellite from the list");
@@ -117,8 +118,8 @@ fn content(app: &App) -> Vec<Line<'static>> {
     heading(&mut l, "Map");
     row(&mut l, "◆", "the sub-satellite point — directly beneath the satellite");
     row(&mut l, "▲", "your ground station");
-    row(&mut l, "☉", "the subsolar point — where the Sun is directly overhead");
-    row(&mut l, "○◔◑◕●", "the sublunar point — the marker's own glyph is the Moon's phase");
+    row(&mut l, "☉", "with `o` on: the subsolar point — where the Sun is directly overhead");
+    row(&mut l, "○◔◑◕●", "with `o` on: the sublunar point — the glyph is the Moon's phase");
     row(&mut l, "· / +", "with `p` on: a labelled city / satellite ground station");
     row(&mut l, "bright line", "the next 65 minutes of ground track");
     row(&mut l, "dim line", "the past 35 minutes of ground track");
@@ -137,9 +138,12 @@ fn content(app: &App) -> Vec<Line<'static>> {
     text(&mut l, "`p` labels prominent cities and ground stations, drawing as many as");
     text(&mut l, "fit without overlapping — so a whole-world map shows only a scattered");
     text(&mut l, "few and more fill in the further `+` zooms in, or `m` widens the map.");
+    text(&mut l, "`o` toggles the Sun/Moon markers; both are off by default.");
     text(&mut l, "`a` shades the night side's aurora probability in three brightening");
-    text(&mut l, "green tiers, on by default but drawing nothing until the feed has");
+    text(&mut l, "green tiers, off by default and drawing nothing until the feed has");
     text(&mut l, "ever returned data — the header shows `AUR` while it's actually live.");
+    text(&mut l, "It's also suppressed while the clock is warping: the nowcast is a");
+    text(&mut l, "real-world snapshot and doesn't track the displayed instant.");
     text(&mut l, "While NEXT PASSES holds focus this pane shows a sky plot of the");
     text(&mut l, "highlighted pass instead — see below.");
     blank(&mut l);

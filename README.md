@@ -171,6 +171,7 @@ and will not work here.
 | `+` / `-` | zoom the follow window in / out (×2–×16); `-` past the widest drops back to the whole world |
 | `p` | toggle labelled cities and ground stations on the map |
 | `a` | toggle the aurora oval on the map |
+| `o` | toggle the Sun/Moon markers on the map |
 | `s` | search Celestrak's catalogue for another object, by name or NORAD id |
 | `r` | refresh the focused panel's feed(s) now |
 | `t` | step to the next configured downlink frequency (drives the `DOPP` row) |
@@ -260,17 +261,19 @@ shown as `MAP ×N` in the panel header — and `-` past the widest drops back to
 the whole world. `◆` sub-satellite point · `▲` ground station · `◉` pad of the
 launch currently highlighted in Launches, with its provider, site and
 coordinates · `☉` the subsolar point · the Moon marker, whose glyph is its own
-phase (`○ ◔ ◑ ◕ ● ◕ ◑ ◔` new through full and back). `p` toggles a layer of
-labelled reference points — `·` cities and `+` satellite ground stations —
-drawn as many as fit without overlapping, so a whole-world map shows only a
-scattered few and more fill in as you zoom. `a` toggles a green aurora oval on
-the night side, from the same OVATION nowcast the `AUR` row reads — on by
-default, but it draws nothing until that feed has ever returned data. While
-the Passes panel has focus this pane shows a sky plot of the highlighted pass
-instead — `▲`/`▼` its rise and set on the horizon rim, `◇` its culmination,
-the arc bright where the satellite is sunlit and dim where it is eclipsed, and
-`◆` the satellite itself whenever the clock is inside the pass, so warping the
-time walks it along the arc.
+phase (`○ ◔ ◑ ◕ ● ◕ ◑ ◔` new through full and back) — `o` toggles both, off
+by default. `p` toggles a layer of labelled reference points — `·` cities and
+`+` satellite ground stations — drawn as many as fit without overlapping, so
+a whole-world map shows only a scattered few and more fill in as you zoom.
+`a` toggles a green aurora oval on the night side, from the same OVATION
+nowcast the `AUR` row reads — off by default, drawing nothing until that feed
+has ever returned data, and suppressed while the clock is warping since the
+nowcast is a real-world snapshot that doesn't track the displayed instant.
+While the Passes panel has focus this pane shows a sky plot of the
+highlighted pass instead — `▲`/`▼` its rise and set on the horizon rim, `◇`
+its culmination, the arc bright where the satellite is sunlit and dim where
+it is eclipsed, and `◆` the satellite itself whenever the clock is inside the
+pass, so warping the time walks it along the arc.
 
 **Space weather** (NOAA SWPC) — `Kp` planetary K-index, 0–9 · `WIND` solar wind
 speed · `Bt`/`Bz` interplanetary field magnitude and its north–south component

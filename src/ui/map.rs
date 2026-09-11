@@ -117,14 +117,15 @@ pub fn draw(
         .map(|p| (p.lon_deg, p.lat_deg))
         .collect();
 
-    // The Sun and Moon, always drawn — unlike the tracks or footprint they
-    // don't depend on a tracked satellite, and unlike the place layer they
-    // aren't gated on `p`: they're live sky, not reference scenery. The Moon
-    // marker doubles as its own phase readout (`MoonPhase::glyph`), the same
-    // "the shape carries the meaning" idiom the naked-eye `★` uses elsewhere.
-    let sun = subsolar_point(now);
-    let moon = sublunar_point(now);
-    let moon_glyph = moon_phase(now).glyph();
+    // The Sun and Moon, gated on `o` like the place layer is on `p` — unlike
+    // the tracks or footprint they don't depend on a tracked satellite, but
+    // they're still real markers a fresh map shouldn't spring on someone
+    // uninvited. The Moon marker doubles as its own phase readout
+    // (`MoonPhase::glyph`), the same "the shape carries the meaning" idiom
+    // the naked-eye `★` uses elsewhere.
+    let sun = app.sun_moon.then(|| subsolar_point(now));
+    let moon = app.sun_moon.then(|| sublunar_point(now));
+    let moon_glyph = app.sun_moon.then(|| moon_phase(now).glyph());
 
     let scene = Scene {
         sat,
@@ -173,14 +174,14 @@ struct Scene<'a> {
     terminator: Vec<(f64, f64)>,
     /// Whether the `p` layer of prominent-place labels is on.
     places: bool,
-    /// The subsolar point — always drawn, not gated on `places` or a tracked
-    /// satellite.
-    sun: GeoPoint,
+    /// The subsolar point — `Some` only while the `o` toggle is on; doesn't
+    /// depend on `places` or a tracked satellite.
+    sun: Option<GeoPoint>,
     /// The sublunar point — see `sun`.
-    moon: GeoPoint,
+    moon: Option<GeoPoint>,
     /// The Moon marker's own glyph, from `MoonPhase::glyph` — the map marker
-    /// doubles as its phase readout.
-    moon_glyph: &'static str,
+    /// doubles as its phase readout. `Some` exactly when `moon` is.
+    moon_glyph: Option<&'static str>,
 }
 
 /// The night wash's output cells, bucketed by what colour they paint: plain
@@ -283,21 +284,26 @@ fn paint_scene(ctx: &mut Context<'_>, grid: &Grid, scene: &Scene<'_>, wash: &Was
     // more live markers from crowding the map with text. Drawn through
     // `print_marker` rather than a bare `ctx.print` (unlike the station
     // above) so a marker outside a narrow follow window's pane is silently
-    // skipped instead of drawn at a saturated, wrong column.
-    print_marker(
-        ctx,
-        grid,
-        scene.sun.lon_deg,
-        scene.sun.lat_deg,
-        &MarkerLabel { glyph: "☉", color: Theme::CAUTION, name: "", detail: None },
-    );
-    print_marker(
-        ctx,
-        grid,
-        scene.moon.lon_deg,
-        scene.moon.lat_deg,
-        &MarkerLabel { glyph: scene.moon_glyph, color: Theme::ACCENT, name: "", detail: None },
-    );
+    // skipped instead of drawn at a saturated, wrong column. `None` while
+    // `o` is off.
+    if let Some(sun) = scene.sun {
+        print_marker(
+            ctx,
+            grid,
+            sun.lon_deg,
+            sun.lat_deg,
+            &MarkerLabel { glyph: "☉", color: Theme::CAUTION, name: "", detail: None },
+        );
+    }
+    if let (Some(moon), Some(glyph)) = (scene.moon, scene.moon_glyph) {
+        print_marker(
+            ctx,
+            grid,
+            moon.lon_deg,
+            moon.lat_deg,
+            &MarkerLabel { glyph, color: Theme::ACCENT, name: "", detail: None },
+        );
+    }
 
     // The highlighted launch's pad, drawn before the satellite so the
     // satellite marker wins if the two ever coincide. The label leads with
@@ -382,10 +388,14 @@ fn draw_places(ctx: &mut Context<'_>, grid: &Grid, scene: &Scene<'_>) {
         let m = MarkerLabel { glyph: "◉", color: Theme::PAD, name: &label, detail: Some(&detail) };
         seed.claim(&marker_cells(grid, p.lon, p.lat, &m));
     }
-    let sun_m = MarkerLabel { glyph: "☉", color: Theme::CAUTION, name: "", detail: None };
-    seed.claim(&marker_cells(grid, scene.sun.lon_deg, scene.sun.lat_deg, &sun_m));
-    let moon_m = MarkerLabel { glyph: scene.moon_glyph, color: Theme::ACCENT, name: "", detail: None };
-    seed.claim(&marker_cells(grid, scene.moon.lon_deg, scene.moon.lat_deg, &moon_m));
+    if let Some(sun) = scene.sun {
+        let sun_m = MarkerLabel { glyph: "☉", color: Theme::CAUTION, name: "", detail: None };
+        seed.claim(&marker_cells(grid, sun.lon_deg, sun.lat_deg, &sun_m));
+    }
+    if let (Some(moon), Some(glyph)) = (scene.moon, scene.moon_glyph) {
+        let moon_m = MarkerLabel { glyph, color: Theme::ACCENT, name: "", detail: None };
+        seed.claim(&marker_cells(grid, moon.lon_deg, moon.lat_deg, &moon_m));
+    }
 
     for place in selected_places(grid, seed) {
         let m = MarkerLabel {
@@ -1482,9 +1492,9 @@ mod tests {
                 places: false,
                 // Parked well away from the 50°N/0–120°E ring under test, so
                 // neither marker can coincidentally share a cell with it.
-                sun: GeoPoint::new(0.0, -170.0, 0.0),
-                moon: GeoPoint::new(0.0, -160.0, 0.0),
-                moon_glyph: "●",
+                sun: Some(GeoPoint::new(0.0, -170.0, 0.0)),
+                moon: Some(GeoPoint::new(0.0, -160.0, 0.0)),
+                moon_glyph: Some("●"),
             };
             let mut buf = Buffer::empty(rect);
             Canvas::default()
