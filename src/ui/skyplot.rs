@@ -22,7 +22,7 @@ use crate::app::{App, Panel};
 use crate::geo::{look_angles, GeoPoint, LookAngles};
 use crate::orbit::{sample_pass, sky_sample, Pass, SatState, SkySample, Tracker};
 use crate::ui::canvas::{Grid, DOTS_X, DOTS_Y};
-use crate::ui::panels::{compass, local_hm, local_hms, split_footer};
+use crate::ui::panels::{compass, local_date, local_hm, local_hms, split_footer};
 use crate::ui::{fitting_hint, panel_block, Highlight, Theme, PANEL_CHROME};
 
 /// Time samples across the arc. ~5 s apart on a ten-minute pass — fine enough
@@ -261,23 +261,28 @@ fn plot_title(highlight: &Highlight<'_>, width: u16) -> String {
     }
 }
 
-/// Footer tiers for [`fitting_hint`], widest first: AOS/culmination/LOS in
-/// local time with compass bearings and the total duration, trimmed step by
-/// step down to just the peak elevation and length.
+/// Footer tiers for [`fitting_hint`], widest first: the pass's local date,
+/// then AOS/culmination/LOS in local time with compass bearings and the total
+/// duration, trimmed step by step down to just the peak elevation and length.
+/// The date sits only on the top tier — every rung below it already dropped
+/// the seconds, so putting the date underneath would break the ladder's rule
+/// that each rung says strictly less than the one above it.
 fn plot_footer(pass: &Pass) -> Vec<String> {
     let dur = pass.duration();
     let (mins, secs) = (dur.num_minutes(), dur.num_seconds() % 60);
     let a = compass(pass.aos_azimuth_deg);
     let l = compass(pass.los_azimuth_deg);
+    let full = format!(
+        "AOS {} {a} {:.0}°  ·  max {:.1}° {}  ·  LOS {} {l}  ·  {mins}m{secs:02}s",
+        local_hms(pass.aos),
+        pass.aos_azimuth_deg,
+        pass.peak_elevation_deg,
+        local_hm(pass.peak),
+        local_hms(pass.los),
+    );
     vec![
-        format!(
-            "AOS {} {a} {:.0}°  ·  max {:.1}° {}  ·  LOS {} {l}  ·  {mins}m{secs:02}s",
-            local_hms(pass.aos),
-            pass.aos_azimuth_deg,
-            pass.peak_elevation_deg,
-            local_hm(pass.peak),
-            local_hms(pass.los),
-        ),
+        format!("{}  ·  {full}", local_date(pass.aos)),
+        full,
         format!(
             "AOS {} {a}  ·  max {:.0}° {}  ·  LOS {} {l}  ·  {mins}m",
             local_hm(pass.aos),
@@ -460,5 +465,32 @@ mod tests {
         assert!(!has_marker(&render(None)), "no marker when the pass is not under way");
         let live = LookAngles { azimuth_deg: 135.0, elevation_deg: 40.0, range_km: 600.0 };
         assert!(has_marker(&render(Some(live))), "and one when it is");
+    }
+
+    #[test]
+    fn the_footer_names_the_date_on_its_widest_tier_only() {
+        let (_, _, pass) = iss_pass_over_munich();
+        let tiers = plot_footer(&pass);
+        assert_eq!(tiers[0], format!("{}  ·  {}", local_date(pass.aos), tiers[1]));
+        // The rest of the ladder is exactly what it was before the date
+        // existed — the date is added, nothing below it changes.
+        assert!(!tiers[1].contains(&local_date(pass.aos)), "the date belongs on tier 0 only");
+    }
+
+    /// The invariant `fitting_hint` relies on: each tier says strictly less
+    /// than the one above it, so trimming to a narrower one never widens the
+    /// footer back out.
+    #[test]
+    fn the_footer_tiers_get_strictly_shorter() {
+        let (_, _, pass) = iss_pass_over_munich();
+        let tiers = plot_footer(&pass);
+        for pair in tiers.windows(2) {
+            assert!(
+                pair[1].chars().count() < pair[0].chars().count(),
+                "{:?} did not shrink from {:?}",
+                pair[1],
+                pair[0],
+            );
+        }
     }
 }

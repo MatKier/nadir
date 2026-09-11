@@ -9,5 +9,6 @@ pub(in crate::ui) mod tracked;
 pub(in crate::ui) mod weather;
 
 pub(in crate::ui) use fmt::{
-    compass, local_hm, local_hms, row_highlight, split_footer, station_label, truncate,
+    compass, local_date, local_hm, local_hms, row_highlight, split_footer, station_label,
+    truncate,
 };

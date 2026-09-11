@@ -24,6 +24,16 @@ pub(in crate::ui) fn local_hms(t: DateTime<Utc>) -> String {
     t.with_timezone(&Local).format("%H:%M:%S").to_string()
 }
 
+/// The full local date form the NEXT PASSES rows and the sky plot's footer
+/// share at their widest.
+pub(in crate::ui) const DATE_FMT: &str = "%a %Y-%m-%d";
+
+/// `t` as a local `Thu 2026-09-11` — local like [`local_hm`], and so with no
+/// trailing `Z`: the zone is stated once in the panel title instead.
+pub(in crate::ui) fn local_date(t: DateTime<Utc>) -> String {
+    t.with_timezone(&Local).format(DATE_FMT).to_string()
+}
+
 pub(super) fn label(text: &str) -> Span<'static> {
     Span::styled(format!("  {text:<6}"), Style::new().fg(Theme::LABEL))
 }
