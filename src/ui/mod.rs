@@ -714,7 +714,8 @@ fn transmitter_popup(
             // prose rather than a bare "no results".
             lines.push(alert(format!("  SatNOGS has no transmitter on file for NORAD {sat}")));
             lines.push(dim(
-                "  add one by hand under [[tracked.transmitters]] in config.toml".to_string(),
+                "  add one by hand to transmitters-<norad>.json in the cache directory"
+                    .to_string(),
             ));
         }
         TransmitterState::Done { found, .. } => {

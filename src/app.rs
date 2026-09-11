@@ -778,8 +778,8 @@ impl App {
             if let Ok(mut d) = self.data.write() {
                 d.tx_lookup = TransmitterState::Failed {
                     norad_id: sat,
-                    msg: "frequency lookup needs network — add one under \
-                          [[tracked.transmitters]] in config.toml"
+                    msg: "frequency lookup needs network — add one to \
+                          transmitters-<norad>.json in the cache directory"
                         .to_string(),
                 };
             }
