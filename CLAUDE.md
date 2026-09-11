@@ -122,5 +122,7 @@ easier to observe.
   and the `?` overlay in `src/ui/help.rs`.
 - `Config::track` is called every frame by `App::sync_tracked_name`, and it
   lifts the existing `TrackedSat` out and puts it back rather than rebuilding
-  it — any per-satellite field added to `TrackedSat` (like `transmitters`) must
-  be carried forward there or the render loop wipes it.
+  it — any per-satellite field added to `TrackedSat` (like `active_transmitter`)
+  must be carried forward there or the render loop wipes it. `Config::downlinks`
+  (the SatNOGS lookup cache, keyed by NORAD id rather than nested in
+  `TrackedSat`) doesn't need this care, since a re-track can't touch it.

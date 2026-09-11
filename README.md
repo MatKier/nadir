@@ -142,11 +142,12 @@ and press `Enter`. `d` drops an entry; the satellite currently being tracked
 cannot be dropped.
 
 When a satellite is first tracked, nadir does a one-shot lookup on
-[SatNOGS DB](https://db.satnogs.org) for its downlink frequencies. Press `T` to
-choose one from what it found (or to look again); the choice is written under
-`[[tracked.transmitters]]` in `config.toml` and drives the `DOPP` telemetry
-row. It is never queried again — edit that block by hand when SatNOGS is wrong,
-out of date, or has no entry for the object.
+[SatNOGS DB](https://db.satnogs.org) for its downlink frequencies, caching the
+result under `~/.cache/nadir/transmitters-<norad>.json`. Press `T` to choose
+one from what it found (or to look again); the choice drives the `DOPP`
+telemetry row and is recorded in `config.toml`. The list itself is never
+queried again — edit that cache file by hand when SatNOGS is wrong, out of
+date, or has no entry for the object.
 
 SGP4/SDP4 (via the `sgp4` crate, which implements both) covers all of Earth
 orbit, including geostationary. It does not cover deep space — an object at a
@@ -234,7 +235,7 @@ opens, zero at closest approach; the number that drives a rotator or an SDR
 correction loop · `DOPP` the configured downlink and the Doppler shift ṙ implies
 for it (`Δf = −f₀·ṙ/c`), shown once a frequency is on file — looked up once from
 SatNOGS DB when a satellite is first tracked (`T` to choose, `t` to step between
-them) and stored in `config.toml` thereafter · `TLE`
+them) and cached thereafter · `TLE`
 time from the element-set epoch and the epoch itself (UTC), e.g.
 `18h since epoch 2026-09-06 23:11Z` — reads *before* instead of *since* when the
 clock is scrubbed ahead of the epoch · `ACC` a
@@ -286,7 +287,7 @@ All keyless; no account or API token is needed.
 | Source | Supplies |
 |---|---|
 | [Celestrak](https://celestrak.org) | TLE element sets, propagated locally with SGP4 |
-| [SatNOGS DB](https://db.satnogs.org) | Downlink frequencies — one-shot lookup when a satellite is first tracked, then read from `config.toml`; never polled |
+| [SatNOGS DB](https://db.satnogs.org) | Downlink frequencies — one-shot lookup when a satellite is first tracked, then read from the disk cache; never polled |
 | [NOAA SWPC](https://www.swpc.noaa.gov) | K-index, solar wind, storm scales, aurora nowcast |
 | [Launch Library 2](https://thespacedevs.com) | Upcoming launches (rate-guarded client-side; falls back to the public test mirror, `lldev.thespacedevs.com`, when the primary host throttles) |
 | ipapi.co / ip-api.com | One-time IP geolocation on first run only |

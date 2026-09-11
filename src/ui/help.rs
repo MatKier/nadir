@@ -168,11 +168,11 @@ fn content(app: &App) -> Vec<Line<'static>> {
     row(&mut l, "DOPP", "the configured downlink and the Doppler shift ṙ puts on it");
     text(&mut l, "Only shown once a downlink frequency is on file. The frequency is looked");
     text(&mut l, "up once from SatNOGS DB when a satellite is first tracked — press T to");
-    text(&mut l, "choose from what it returns, t to step between them — and stored in");
-    text(&mut l, "config.toml, hand-editable, never polled again. Δf = -f0·ṙ/c: a closing");
-    text(&mut l, "pass shifts the received frequency up, so you tune above the nominal. A");
-    text(&mut l, "wide terminal labels both frequencies \"MHz\" and the received one \"rx\"; a");
-    text(&mut l, "narrow one drops those and the mode a step at a time.");
+    text(&mut l, "choose from what it returns, t to step between them — and cached, never");
+    text(&mut l, "polled again. Δf = -f0·ṙ/c: a closing pass shifts the received");
+    text(&mut l, "frequency up, so you tune above the nominal. A wide terminal labels");
+    text(&mut l, "both frequencies \"MHz\" and the received one \"rx\"; a narrow one drops");
+    text(&mut l, "those and the mode a step at a time.");
     row(&mut l, "TLE", "time from the element-set epoch — amber past 36h, red past 72h");
     text(&mut l, "Names the epoch inline — \"18h since epoch 2026-09-06 23:11Z\" (UTC) on a wide");
     text(&mut l, "terminal, shortening to \"18h since 09-06 23:11Z\" as the panel narrows. Reads");
@@ -277,7 +277,7 @@ fn content(app: &App) -> Vec<Line<'static>> {
     text(&mut l, "`r` refetches only the focused panel's feeds, without spending a");
     text(&mut l, "request on anything else.");
     text(&mut l, "The SatNOGS downlink lookup has no chip: it is a one-shot on first");
-    text(&mut l, "track, not a feed, and config.toml is authoritative once it has run.");
+    text(&mut l, "track, not a feed, and the cached result is authoritative once it has run.");
     blank(&mut l);
 
     heading(&mut l, "Offline mode — how the position is known with no network");
@@ -299,8 +299,8 @@ fn content(app: &App) -> Vec<Line<'static>> {
     text(&mut l, "estimates and the amber/red TLE age flags.");
     text(&mut l, "What can't be computed, and so goes stale or blank offline: space");
     text(&mut l, "weather, aurora, and the launch manifest. The SatNOGS downlink");
-    text(&mut l, "lookup also needs the network, but a downlink already in config.toml");
-    text(&mut l, "still drives DOPP offline — the Doppler shift itself is local math.");
+    text(&mut l, "lookup also needs the network, but a downlink already cached still");
+    text(&mut l, "drives DOPP offline — the Doppler shift itself is local math.");
     text(&mut l, "--offline makes zero network requests and loads the last cached");
     text(&mut l, "TLE, weather and launches, each labelled with its age. A");
     text(&mut l, "normal run warm-starts from that same cache while it fetches.");

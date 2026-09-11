@@ -1,14 +1,19 @@
 //! SatNOGS DB transmitter records: the frequencies a satellite actually
 //! downlinks on. Keyless and public.
 //!
-//! This is deliberately *not* a feed. Celestrak publishes orbits, not radios,
-//! and a satellite's downlink is static for years, so there is no `Feed<T>`,
-//! no `Notifiers` entry, no status chip, no refresh interval and no cache
-//! key: the lookup runs once when a satellite is added to the tracked list,
-//! the chosen transmitter is written into `config.toml`, and nothing queries
-//! again unless the user asks. From that point `config.toml` — hand-editable —
-//! is the source of truth, which is what you want the day SatNOGS is wrong,
-//! stale, or has never heard of the object.
+//! This is deliberately *not* a `Feed<T>`. Celestrak publishes orbits, not
+//! radios, and a satellite's downlink is static for years, so there is no
+//! `Notifiers` entry, no status chip and no refresh interval: the lookup runs
+//! once when a satellite is added to the tracked list, and nothing queries
+//! again unless the user asks. The result is still cached — under
+//! `transmitters-<norad>` via `Config::set_transmitters`, next to that
+//! satellite's `tle-<norad>` element set — but that cache entry only decides
+//! whether a *lookup* is skipped; which transmitter is active is a choice, and
+//! that stays in `config.toml`. Hand-editing the cache file works exactly
+//! like hand-editing config.toml did before it moved: `T` in the running app
+//! is the friendlier way to fix a stale or wrong record, and a cache wipe
+//! just costs one more query to a small volunteer service, never a load
+//! failure.
 //!
 //! Two shapes to know about, because every other JSON source in this tree
 //! differs: the endpoint answers with a **bare array**, no pagination
