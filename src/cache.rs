@@ -2,7 +2,11 @@
 //!
 //! Each data source stores its last good raw payload under a stable key. On a
 //! failed fetch (or in `--offline` mode) nadir falls back to whatever is here,
-//! so the map and pass predictions keep working with no network.
+//! so the map and pass predictions keep working with no network. One entry
+//! class is different: `transmitters-<norad>` (see
+//! `config::Config::downlinks`) is the sole copy of a one-shot SatNOGS lookup,
+//! possibly hand-corrected — nothing refetches it on a schedule, so losing it
+//! costs a live query, not just a stale read.
 
 use std::path::PathBuf;
 use std::time::{Duration, SystemTime};
@@ -53,5 +57,13 @@ impl Cache {
         let meta = std::fs::metadata(self.path_for(key)).ok()?;
         let modified = meta.modified().ok()?;
         SystemTime::now().duration_since(modified).ok()
+    }
+
+    /// A cache rooted at an arbitrary directory, for tests that need to drive
+    /// the real put/get path without touching the real `~/.cache/nadir`.
+    /// `open()` remains the only production entry point.
+    #[cfg(test)]
+    pub(crate) fn in_dir(dir: PathBuf) -> Self {
+        Self { dir }
     }
 }

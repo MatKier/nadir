@@ -186,11 +186,8 @@ mod interval_str {
 }
 
 /// One downlink a satellite is known to transmit on, seeded from a one-shot
-/// SatNOGS DB lookup when the satellite is first tracked. Cached, not
-/// configured: the list lives in `~/.cache/nadir/transmitters-<norad>.json`
-/// (see [`Config::downlinks`]) rather than in `config.toml`, since it is
-/// fetched data nadir can always ask SatNOGS for again — a cache wipe just
-/// means the next `switch_satellite` looks it up once more.
+/// SatNOGS DB lookup when the satellite is first tracked. See
+/// [`Config::downlinks`] for where and why this is stored.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Transmitter {
     /// Downlink centre frequency in hertz. Integral because that is how SatNOGS
@@ -214,9 +211,10 @@ pub struct TrackedSat {
     pub norad_id: u64,
     pub name: String,
     /// Index into `Config::downlinks[norad_id]` of the one currently driving
-    /// the DOPP row. Clamped on read, so a hand-edited value past the end of
-    /// the list (or a list since shortened by a re-lookup, or emptied by a
-    /// cache wipe) is harmless.
+    /// the DOPP row — the user's choice, so unlike the list itself it lives
+    /// here in config.toml. Clamped on read, so a hand-edited value past the
+    /// end of the list (or a list since shortened by a re-lookup, or emptied
+    /// by a cache wipe) is harmless.
     #[serde(default)]
     pub active_transmitter: usize,
 }
@@ -270,19 +268,24 @@ pub struct Config {
     #[serde(skip)]
     pub sat_query: Option<String>,
     /// Downlink lists, keyed by NORAD id — the in-memory half of the
-    /// `transmitters-<norad>.json` cache entries `Config::load` hydrates this
-    /// from and `set_transmitters` writes through to. Not config: the list is
-    /// fetched data, while the index into it (`TrackedSat::active_transmitter`)
-    /// is the user's choice and stays in the file. Held here, rather than back
-    /// on `TrackedSat`, because every accessor needs both together.
+    /// `transmitters-<norad>.json` cache entries `load_downlinks` hydrates
+    /// this from and `set_transmitters` writes through to. Kept separate from
+    /// `TrackedSat` (rather than nested on it, as it was before this existed)
+    /// because `TrackedSat` is exactly what serialises into config.toml:
+    /// fetched data has to live off of it to stay out of the file.
+    /// `TrackedSat::active_transmitter` — the index into a satellite's list
+    /// here — is the user's choice, not fetched data, so it stays on
+    /// `TrackedSat` and in the file. A cache wipe or miss just costs one more
+    /// SatNOGS lookup on the next switch — never an error, never a blank
+    /// config.
     #[serde(skip)]
-    pub downlinks: HashMap<u64, Vec<Transmitter>>,
-    /// Handle to the disk cache backing `downlinks`. `None` in
-    /// `Config::default()` so unit tests never touch the real cache
-    /// directory — the same convention that keeps an empty `path` out of the
-    /// real config file.
+    downlinks: HashMap<u64, Vec<Transmitter>>,
+    /// Handle to the disk cache backing `downlinks`, attached by
+    /// `load_downlinks` rather than opened here. `None` in `Config::default()`
+    /// so unit tests never touch the real cache directory — the same
+    /// convention that keeps an empty `path` out of the real config file.
     #[serde(skip)]
-    pub cache: Option<Cache>,
+    cache: Option<Cache>,
 }
 
 fn default_sat() -> u64 {
@@ -343,27 +346,27 @@ impl Config {
             .with_context(|| format!("parsing config file {}", path.display()))?;
         cfg.path = path;
         cfg.is_new = false;
-        cfg.load_downlinks();
         Ok(cfg)
     }
 
-    /// Hydrate `downlinks` from the disk cache for every currently tracked
-    /// satellite. Called once from `load`, eagerly rather than lazily: a
-    /// missing entry is exactly what tells `switch_satellite` to fire a
-    /// SatNOGS lookup, so the map has to already reflect the cache by the
-    /// time the first satellite switch is considered, not fill in on demand.
-    /// A satellite with no cache entry (never looked up, or the cache was
-    /// wiped) is silently left absent — this is cache, not config, so a miss
-    /// here is never an error.
-    fn load_downlinks(&mut self) {
-        self.cache = Cache::open().ok();
-        let Some(cache) = self.cache.clone() else { return };
+    /// Attach the disk cache and hydrate `downlinks` from it for every
+    /// currently tracked satellite. Called once by `app::run`, right after it
+    /// opens the cache it owns for the whole session — not from `load`, so
+    /// there is exactly one `Cache::open()` per run and one failure policy for
+    /// it, rather than `load` silently swallowing a second, independent open.
+    ///
+    /// Eager rather than lazy: a missing entry is exactly what tells
+    /// `switch_satellite` to fire a SatNOGS lookup, so the map has to already
+    /// reflect the cache by the time the first satellite switch is
+    /// considered, not fill in on demand. A satellite with no cache entry
+    /// (never looked up, or the cache was wiped) is silently left absent —
+    /// this is cache, not config, so a miss here is never an error.
+    pub(crate) fn load_downlinks(&mut self, cache: &Cache) {
+        self.cache = Some(cache.clone());
         for t in &self.tracked {
-            if let Some(bytes) = cache.get(&transmitters_cache_key(t.norad_id)) {
-                if let Ok(list) = serde_json::from_slice::<Vec<Transmitter>>(&bytes) {
-                    self.downlinks.insert(t.norad_id, list);
-                }
-            }
+            let Some(bytes) = cache.get(&transmitters_cache_key(t.norad_id)) else { continue };
+            let Ok(list) = serde_json::from_slice::<Vec<Transmitter>>(&bytes) else { continue };
+            self.downlinks.insert(t.norad_id, list);
         }
     }
 
@@ -465,25 +468,22 @@ impl Config {
         if let Some(t) = self.tracked.iter_mut().find(|t| t.norad_id == norad_id) {
             t.active_transmitter = active.min(list.len().saturating_sub(1));
         }
-        if let Some(cache) = &self.cache {
-            if let Ok(bytes) = serde_json::to_vec(&list) {
-                let _ = cache.put(&transmitters_cache_key(norad_id), &bytes);
-            }
+        if let (Some(cache), Ok(bytes)) = (&self.cache, serde_json::to_vec(&list)) {
+            let _ = cache.put(&transmitters_cache_key(norad_id), &bytes);
         }
         self.downlinks.insert(norad_id, list);
     }
 
     /// Advance the active transmitter to the next in the list, wrapping. A
-    /// no-op with fewer than two on file. Returns the now-active one so the
-    /// caller can name it in a log line.
-    pub fn cycle_transmitter(&mut self, norad_id: u64) -> Option<&Transmitter> {
+    /// no-op with fewer than two on file.
+    pub fn cycle_transmitter(&mut self, norad_id: u64) {
         let len = self.transmitters(norad_id).len();
-        let t = self.tracked.iter_mut().find(|t| t.norad_id == norad_id)?;
-        if len >= 2 {
+        if len < 2 {
+            return;
+        }
+        if let Some(t) = self.tracked.iter_mut().find(|t| t.norad_id == norad_id) {
             t.active_transmitter = (t.active_transmitter + 1) % len;
         }
-        let i = t.active_transmitter;
-        self.transmitters(norad_id).get(i)
     }
 
     /// Remove a satellite from the tracked list. Returns `false` if it wasn't
@@ -561,29 +561,50 @@ mod tests {
     }
 
     #[test]
-    fn track_preserves_the_transmitters_already_recorded_for_a_satellite() {
+    fn track_preserves_the_active_transmitter_index() {
         // The regression guard for the render-loop clobber: `sync_tracked_name`
         // calls `track()` every time the catalogue name changes, and it must
-        // not throw away a lookup result.
+        // not throw away a hand-picked transmitter. `downlinks` needs no such
+        // guard — it's keyed by NORAD id, not nested in the tracked entry, so
+        // `track()` structurally cannot touch it.
         let mut c = Config::default();
         c.track(25544, "NORAD 25544");
         c.set_transmitters(25544, vec![tx(145_800_000, "FM"), tx(437_800_000, "FSK")], 1);
         c.track(25544, "ISS (ZARYA)");
-        assert_eq!(c.transmitters(25544).len(), 2, "list survived the re-track");
         assert_eq!(c.active_transmitter(25544).map(|t| t.downlink_hz), Some(437_800_000));
         assert_eq!(c.tracked[0].name, "ISS (ZARYA)");
     }
 
+    /// A cache rooted at a fresh temp directory, for tests that need to drive
+    /// the real `Cache::put`/`get` path rather than the codec alone.
+    /// `Config::default()`'s `cache: None` keeps every other test hermetic;
+    /// this is the one place a test deliberately opts back into real (if
+    /// scratch) disk I/O.
+    fn temp_cache() -> (Cache, std::path::PathBuf) {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static COUNTER: AtomicU64 = AtomicU64::new(0);
+        let n = COUNTER.fetch_add(1, Ordering::Relaxed);
+        let dir = std::env::temp_dir().join(format!("nadir-config-test-{}-{n}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        (Cache::in_dir(dir.clone()), dir)
+    }
+
     #[test]
-    fn a_downlink_list_round_trips_through_the_cache_json() {
-        // Downlinks no longer live in config.toml, so their round trip is
-        // through the same serde_json encoding `set_transmitters`/
-        // `load_downlinks` push through `Cache::put`/`get`, not through toml.
-        let list =
-            vec![tx(145_800_000, "FM"), tx(437_800_000, "FSK"), tx(2_265_000_000, "QPSK")];
-        let bytes = serde_json::to_vec(&list).unwrap();
-        let back: Vec<Transmitter> = serde_json::from_slice(&bytes).unwrap();
-        assert_eq!(back, list);
+    fn set_transmitters_writes_through_and_a_fresh_load_reads_it_back() {
+        let (cache, dir) = temp_cache();
+        let mut c = Config::default();
+        c.track(25544, "ISS (ZARYA)");
+        c.load_downlinks(&cache); // attaches the cache so set_transmitters can write
+        c.set_transmitters(25544, vec![tx(145_800_000, "FM"), tx(437_800_000, "FSK")], 1);
+
+        // A fresh Config, sharing nothing but the tracked list and cache dir,
+        // is what a real restart's `load_downlinks` sees.
+        let mut reloaded = Config { tracked: c.tracked.clone(), ..Config::default() };
+        reloaded.load_downlinks(&cache);
+        assert_eq!(reloaded.transmitters(25544), c.transmitters(25544));
+        assert_eq!(reloaded.active_transmitter(25544).map(|t| t.downlink_hz), Some(437_800_000));
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
@@ -591,7 +612,6 @@ mod tests {
         // The format written before this field existed.
         let c: Config =
             toml::from_str("[[tracked]]\nnorad_id = 25544\nname = \"ISS (ZARYA)\"\n").unwrap();
-        assert!(c.transmitters(25544).is_empty());
         assert_eq!(c.tracked[0].active_transmitter, 0);
     }
 
@@ -609,9 +629,6 @@ mod tests {
         )
         .unwrap();
         assert_eq!(c.tracked[0].norad_id, 25544);
-        // Not hydrated from the (nonexistent) cache — the legacy row is
-        // dropped, not migrated. `T` re-queries SatNOGS for it.
-        assert!(c.transmitters(25544).is_empty());
     }
 
     #[test]
