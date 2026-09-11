@@ -170,6 +170,7 @@ and will not work here.
 | `f` | follow the satellite (zoom the map on it) |
 | `+` / `-` | zoom the follow window in / out (×2–×16); `-` past the widest drops back to the whole world |
 | `p` | toggle labelled cities and ground stations on the map |
+| `a` | toggle the aurora oval on the map |
 | `s` | search Celestrak's catalogue for another object, by name or NORAD id |
 | `r` | refresh the focused panel's feed(s) now |
 | `t` | step to the next configured downlink frequency (drives the `DOPP` row) |
@@ -195,9 +196,10 @@ with provider and pad, and marks the pad on the map with `◉` plus the provider
 vehicle name, site and coordinates, for as long as the row stays highlighted.
 Highlighting a pass, likewise, turns the map pane into a sky plot of it — a
 polar azimuth/elevation chart, zenith at the centre and horizon at the rim,
-with the arc bright while the satellite is sunlit and dim while it is in the
-Earth's shadow, and the satellite marked on it while the pass is under way —
-for as long as Passes keeps focus.
+with the star field, the Sun and the Moon placed as they'll actually be at
+that pass's culmination, behind an arc bright while the satellite is sunlit
+and dim while it is in the Earth's shadow, and the satellite marked on it
+while the pass is under way — for as long as Passes keeps focus.
 
 The clock keys detach the display from wall time so you can watch a pass play
 out, step to where the satellite will be, or run the ground track backwards.
@@ -228,9 +230,10 @@ from SGP4, not ground-relative · `POS` sub-satellite lat/lon · `FOOT` radius o
 the ground circle that can see the satellite above 0° elevation · `ORB` orbital
 regime (LEO/MEO/GEO/GSO/HEO/HIGH) from altitude and eccentricity, plus a `-P`
 (polar) or `-S` (sun-synchronous) suffix from inclination when it applies, and
-period and inclination from the element set · `APSIS` perigee × apogee altitude,
-measured from the WGS-84 equatorial radius rather than `ALT`'s local ellipsoid,
-so the two can read up to ~20 km apart away from the equator · `REV` approximate
+period and inclination from the element set · `APSIS` perigee × apogee altitude
+and eccentricity, measured from the WGS-84 equatorial radius rather than
+`ALT`'s local ellipsoid, so the two can read up to ~20 km apart away from the
+equator · `REV` approximate
 revolution number since launch · `SUN` sunlit/eclipsed and time to the next
 transition · `RANGE` slant range and elevation from your ground station · `RATE`
 range rate ṙ in km/s — negative while the satellite closes, positive while it
@@ -256,9 +259,13 @@ that window through four magnifications — ×2, ×4, ×8, ×16 the whole-world 
 shown as `MAP ×N` in the panel header — and `-` past the widest drops back to
 the whole world. `◆` sub-satellite point · `▲` ground station · `◉` pad of the
 launch currently highlighted in Launches, with its provider, site and
-coordinates. `p` toggles a layer of labelled reference points — `·` cities and
-`+` satellite ground stations — drawn as many as fit without overlapping, so a
-whole-world map shows only a scattered few and more fill in as you zoom. While
+coordinates · `☉` the subsolar point · the Moon marker, whose glyph is its own
+phase (`○ ◔ ◑ ◕ ● ◕ ◑ ◔` new through full and back). `p` toggles a layer of
+labelled reference points — `·` cities and `+` satellite ground stations —
+drawn as many as fit without overlapping, so a whole-world map shows only a
+scattered few and more fill in as you zoom. `a` toggles a green aurora oval on
+the night side, from the same OVATION nowcast the `AUR` row reads — on by
+default, but it draws nothing until that feed has ever returned data. While
 the Passes panel has focus this pane shows a sky plot of the highlighted pass
 instead — `▲`/`▼` its rise and set on the horizon rim, `◇` its culmination,
 the arc bright where the satellite is sunlit and dim where it is eclipsed, and
@@ -266,9 +273,13 @@ the arc bright where the satellite is sunlit and dim where it is eclipsed, and
 time walks it along the arc.
 
 **Space weather** (NOAA SWPC) — `Kp` planetary K-index, 0–9 · `WIND` solar wind
-speed · `Bz` north–south interplanetary field (strongly negative drives aurora) ·
-`STORM R/S/G` NOAA's radio-blackout / radiation-storm / geomagnetic-storm scales,
-0–5 · `AUR` aurora probability overhead at your ground station.
+speed · `Bt`/`Bz` interplanetary field magnitude and its north–south component
+(strongly negative `Bz` drives aurora) · `STORM R/S/G` NOAA's radio-blackout /
+radiation-storm / geomagnetic-storm scales, 0–5 · `AUR` aurora probability
+overhead at your ground station · `MOON` phase, illuminated fraction and
+elevation from your ground station — local math, not a feed, so it never goes
+stale; it's what decides whether a `★` naked-eye pass in Next Passes is
+actually worth walking outside for.
 
 Space Weather and Launches show their feed's age under the panel title once it
 has gone stale, e.g. `space weather · 1m old`.

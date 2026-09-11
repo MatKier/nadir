@@ -29,6 +29,10 @@ pub struct Pass {
     /// Azimuth at AOS and at LOS, in degrees.
     pub aos_azimuth_deg: f64,
     pub los_azimuth_deg: f64,
+    /// Azimuth at culmination, in degrees — the bearing you're actually
+    /// pointing at when the satellite is highest, as opposed to `aos`/`los`,
+    /// which only bracket where it rises and sets.
+    pub peak_azimuth_deg: f64,
     /// True when the satellite is sunlit at culmination while the observer is in
     /// darkness — i.e. the pass should actually be visible to the naked eye.
     pub visible: bool,
@@ -163,6 +167,7 @@ pub fn predict_passes(
                     peak_elevation_deg: peak_el,
                     aos_azimuth_deg: azimuth_at(tracker, station, aos),
                     los_azimuth_deg: azimuth_at(tracker, station, los),
+                    peak_azimuth_deg: azimuth_at(tracker, station, peak),
                     visible: sat_sunlit && observer_dark,
                 });
             }
@@ -345,6 +350,25 @@ mod tests {
             let los_el = elevation_at(&tr, &munich, p.los);
             assert!(aos_el.abs() < 0.5, "AOS sits at {aos_el:.3}°, not on the horizon");
             assert!(los_el.abs() < 0.5, "LOS sits at {los_el:.3}°, not on the horizon");
+        }
+    }
+
+    /// `peak_azimuth_deg` has to be the bearing `sky_sample` itself reports at
+    /// `p.peak` — it is computed by the same `azimuth_at` helper `aos`/`los`
+    /// already are, just at a third instant, so this is really pinning that
+    /// third call down rather than testing new geometry.
+    #[test]
+    fn peak_azimuth_matches_a_direct_sky_sample_at_culmination() {
+        let tr = test_tracker();
+        let munich = test_station();
+        for p in test_passes() {
+            let direct = sky_sample(&tr, &munich, p.peak).expect("culmination propagates");
+            assert!(
+                (p.peak_azimuth_deg - direct.azimuth_deg).abs() < 1e-6,
+                "peak_azimuth_deg {} vs sky_sample {}",
+                p.peak_azimuth_deg,
+                direct.azimuth_deg,
+            );
         }
     }
 

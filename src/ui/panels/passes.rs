@@ -98,8 +98,9 @@ pub fn draw(
 const DATE_FORMS: [&str; 3] = [DATE_FMT, "%a %m-%d", "%a"];
 
 /// One NEXT PASSES row: day, AOS–LOS in local time, duration, peak elevation
-/// and the AOS→LOS compass azimuths. `date_fmt` picks the rung of
-/// [`DATE_FORMS`] the leading date is spelled out at.
+/// and the AOS→peak→LOS compass azimuths — the bearing you'd actually point
+/// at through the whole pass, not just where it rises and sets. `date_fmt`
+/// picks the rung of [`DATE_FORMS`] the leading date is spelled out at.
 fn pass_row(p: &Pass, now: DateTime<Utc>, date_fmt: &str) -> Line<'static> {
     let aos = p.aos.with_timezone(&Local);
     let los = p.los.with_timezone(&Local);
@@ -115,18 +116,31 @@ fn pass_row(p: &Pass, now: DateTime<Utc>, date_fmt: &str) -> Line<'static> {
         style = style.fg(Theme::SAT).add_modifier(Modifier::BOLD);
     }
 
+    // The peak bearing is dropped from the middle of the arrow when it reads
+    // the same 16-point compass name as AOS or LOS already do, so a pass
+    // whose culmination doesn't meaningfully add a new direction — a short,
+    // low one, typically — stays a plain `SSW→ENE` instead of a redundant
+    // `SSW→ENE→ENE`. Once it names a third point, showing it is exactly the
+    // case that's worth the extra width: the pass swings wide of a straight
+    // line between where it rises and sets.
+    let (aos_c, peak_c, los_c) =
+        (compass(p.aos_azimuth_deg), compass(p.peak_azimuth_deg), compass(p.los_azimuth_deg));
+    let bearing = if peak_c == aos_c || peak_c == los_c {
+        format!("{aos_c}→{los_c}")
+    } else {
+        format!("{aos_c}→{peak_c}→{los_c}")
+    };
+
     let star = if p.visible { "★" } else { " " };
     Line::from(vec![
         Span::styled(format!("{star} "), Style::new().fg(Theme::SAT)),
         Span::styled(
             format!(
-                "{date} {}–{} {:>2}m {:>2.0}° {}→{}",
+                "{date} {}–{} {:>2}m {:>2.0}° {bearing}",
                 aos.format("%H:%M"),
                 los.format("%H:%M"),
                 p.duration().num_minutes(),
                 p.peak_elevation_deg,
-                compass(p.aos_azimuth_deg),
-                compass(p.los_azimuth_deg),
             ),
             style,
         ),
@@ -355,6 +369,7 @@ mod tests {
             peak_elevation_deg: 30.0,
             aos_azimuth_deg: aos_az,
             los_azimuth_deg: los_az,
+            peak_azimuth_deg: (aos_az + los_az) / 2.0,
             visible: false,
         }
     }
@@ -421,6 +436,49 @@ mod tests {
                 assert!(row.width() <= budget, "budget {budget}: width {}", row.width());
             }
         }
+    }
+
+    /// A `Pass` with all three azimuths set independently, for the bearing
+    /// tests below — `test_pass` above ties `peak` to the midpoint of
+    /// `aos`/`los`, which can't exercise the "peak on a straight line"
+    /// collapse on its own.
+    fn test_pass_with_peak(aos_az: f64, peak_az: f64, los_az: f64) -> Pass {
+        use chrono::TimeZone;
+        let aos = Utc.with_ymd_and_hms(2026, 9, 11, 20, 14, 0).unwrap();
+        Pass {
+            aos,
+            los: aos + Duration::minutes(6),
+            peak: aos + Duration::minutes(3),
+            peak_elevation_deg: 30.0,
+            aos_azimuth_deg: aos_az,
+            los_azimuth_deg: los_az,
+            peak_azimuth_deg: peak_az,
+            visible: false,
+        }
+    }
+
+    /// A pass that swings well wide of a straight AOS→LOS line — a high
+    /// overhead pass, typically — earns the three-point `AOS→peak→LOS`
+    /// bearing.
+    #[test]
+    fn a_pass_that_swings_wide_of_a_straight_line_shows_its_peak_bearing() {
+        let p = test_pass_with_peak(270.0, 0.0, 90.0); // W → N → E
+        let row = pass_row(&p, p.aos - Duration::hours(1), "%a");
+        // Only the bearing is under test here; date and clock time (in the
+        // system's local zone, which the test can't pin down) are covered by
+        // the other `pass_row`/`pass_rows` tests in this module.
+        assert!(line_text(&row).ends_with(" 30° W→N→E"), "{}", line_text(&row));
+    }
+
+    /// When the culmination reads the same 16-point compass name as AOS (or
+    /// LOS) already does, naming it a second time would be redundant — the
+    /// row collapses to the plain two-point `AOS→LOS` it always showed before
+    /// `peak_azimuth_deg` existed.
+    #[test]
+    fn a_pass_whose_peak_reads_the_same_compass_point_as_aos_keeps_the_two_point_bearing() {
+        let p = test_pass_with_peak(0.0, 5.0, 90.0); // both N and 5° round to "N"
+        let row = pass_row(&p, p.aos - Duration::hours(1), "%a");
+        assert!(line_text(&row).ends_with(" 30° N→E"), "{}", line_text(&row));
     }
 
     /// The ladder is resolved once over the whole list, not per row: a list

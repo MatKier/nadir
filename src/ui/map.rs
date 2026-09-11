@@ -9,10 +9,11 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::canvas::{Canvas, Context, Line as CanvasLine, Map, MapResolution, Points};
 use ratatui::Frame;
 
+use crate::api::swpc::AuroraGrid;
 use crate::app::{App, Panel};
 use crate::geo::{footprint_ring, GeoPoint};
-use crate::orbit::solar::{terminator_polyline, SunGeometry, CIVIL_TWILIGHT_DEG};
-use crate::orbit::{SatState, Tracker};
+use crate::orbit::solar::{subsolar_point, terminator_polyline, SunGeometry, CIVIL_TWILIGHT_DEG};
+use crate::orbit::{moon_phase, sublunar_point, SatState, Tracker};
 use crate::ui::canvas::Grid;
 use crate::ui::panels::truncate;
 use crate::ui::places::{Place, PLACES};
@@ -72,12 +73,20 @@ pub fn draw(
     sat: Option<&(Tracker, SatState)>,
     now: DateTime<Utc>,
     pad: Option<PadMarker>,
+    aurora: Option<&AuroraGrid>,
 ) {
     // The follow-window centre — `Some` only once we're following *and* an
     // element set has arrived, so the zoom indicator and the bounds can never
     // claim a magnification the map isn't actually showing.
     let centre = sat.filter(|_| app.follow).map(|(_, s)| &s.sub_point);
-    let title = zoom_title(centre, app.zoom);
+    let mut title = zoom_title(centre, app.zoom);
+    // `aurora` is already `None` unless both the `a` toggle is on and the
+    // feed has ever returned a grid, so this marker means "the oval below is
+    // real data", not just "the key is on" — the same promise `MAP ×N` makes
+    // about the zoom it names.
+    if aurora.is_some() {
+        title.push_str(" · AUR");
+    }
     let block =
         panel_block(Panel::Map, &title, is_focused(app, Panel::Map) || app.map_fullscreen);
     // The block's inner cell grid, measured before the block is rendered —
@@ -108,8 +117,28 @@ pub fn draw(
         .map(|p| (p.lon_deg, p.lat_deg))
         .collect();
 
-    let scene =
-        Scene { sat, pad, station, track_past, track_future, footprint, terminator, places: app.places };
+    // The Sun and Moon, always drawn — unlike the tracks or footprint they
+    // don't depend on a tracked satellite, and unlike the place layer they
+    // aren't gated on `p`: they're live sky, not reference scenery. The Moon
+    // marker doubles as its own phase readout (`MoonPhase::glyph`), the same
+    // "the shape carries the meaning" idiom the naked-eye `★` uses elsewhere.
+    let sun = subsolar_point(now);
+    let moon = sublunar_point(now);
+    let moon_glyph = moon_phase(now).glyph();
+
+    let scene = Scene {
+        sat,
+        pad,
+        station,
+        track_past,
+        track_future,
+        footprint,
+        terminator,
+        places: app.places,
+        sun,
+        moon,
+        moon_glyph,
+    };
 
     // One canvas per pane. A single `Canvas` has one linear longitude→column
     // mapping and so cannot show the coastline in two disjoint screen
@@ -121,12 +150,12 @@ pub fn draw(
     // single-canvas render.
     for pane in panes(inner, x_bounds) {
         let grid = Grid { inner: pane.rect, x: pane.x, y: y_bounds };
-        let (night, twilight) = night_wash(&grid, now);
+        let wash = night_wash(&grid, now, aurora);
         let canvas = Canvas::default()
             .marker(Marker::Braille)
             .x_bounds(pane.x)
             .y_bounds(y_bounds)
-            .paint(|ctx| paint_scene(ctx, &grid, &scene, &night, &twilight));
+            .paint(|ctx| paint_scene(ctx, &grid, &scene, &wash));
         frame.render_widget(canvas, pane.rect);
     }
 }
@@ -144,29 +173,52 @@ struct Scene<'a> {
     terminator: Vec<(f64, f64)>,
     /// Whether the `p` layer of prominent-place labels is on.
     places: bool,
+    /// The subsolar point — always drawn, not gated on `places` or a tracked
+    /// satellite.
+    sun: GeoPoint,
+    /// The sublunar point — see `sun`.
+    moon: GeoPoint,
+    /// The Moon marker's own glyph, from `MoonPhase::glyph` — the map marker
+    /// doubles as its phase readout.
+    moon_glyph: &'static str,
+}
+
+/// The night wash's output cells, bucketed by what colour they paint: plain
+/// night/twilight, or one of three brightening aurora tiers for a dark cell
+/// whose sampled probability crossed a threshold (see [`night_wash`]). A
+/// small struct rather than a longer tuple so `paint_scene`'s signature stays
+/// readable and a caller can't mix up which slice is which.
+#[derive(Default)]
+struct Wash {
+    night: Vec<(f64, f64)>,
+    twilight: Vec<(f64, f64)>,
+    aurora_low: Vec<(f64, f64)>,
+    aurora_med: Vec<(f64, f64)>,
+    aurora_high: Vec<(f64, f64)>,
 }
 
 /// Paint one map pane: the night wash, coastline, terminator, tracks,
 /// footprint and markers, in the same layer order the single canvas used
-/// before the view could be split. `night`/`twilight` are this pane's own
-/// wash cells; every other field is shared across panes via `scene`.
-fn paint_scene(
-    ctx: &mut Context<'_>,
-    grid: &Grid,
-    scene: &Scene<'_>,
-    night: &[(f64, f64)],
-    twilight: &[(f64, f64)],
-) {
+/// before the view could be split. `wash` is this pane's own wash cells;
+/// every other field is shared across panes via `scene`.
+fn paint_scene(ctx: &mut Context<'_>, grid: &Grid, scene: &Scene<'_>, wash: &Wash) {
     // The night wash is a *background*, not a foreground overlay: it has to go
     // on a `Block` grid, whose cells carry a bg colour (ratatui's
     // `PatternGrid`, what `Braille` uses, only ever sets fg — see
     // `CharGrid::apply_color_to_bg` upstream). Painted first and switched away
     // from before the coastline, so the Braille coastline dots drawn next land
     // on top of it rather than being recoloured by it the way a same-layer
-    // stipple would.
+    // stipple would. The three aurora tiers are drawn last, on the *same*
+    // Block grid and so the same layer: a `Block` cell is a solid fill, not a
+    // fused bitmask the way Braille is, so the later draw call simply wins
+    // the cell outright — exactly what turns a plain night cell into a
+    // glowing one wherever the sampled probability crossed a threshold.
     ctx.marker(Marker::Block);
-    ctx.draw(&Points { coords: twilight, color: Theme::TWILIGHT });
-    ctx.draw(&Points { coords: night, color: Theme::NIGHT });
+    ctx.draw(&Points { coords: &wash.twilight, color: Theme::TWILIGHT });
+    ctx.draw(&Points { coords: &wash.night, color: Theme::NIGHT });
+    ctx.draw(&Points { coords: &wash.aurora_low, color: Theme::AURORA_LOW });
+    ctx.draw(&Points { coords: &wash.aurora_med, color: Theme::AURORA_MED });
+    ctx.draw(&Points { coords: &wash.aurora_high, color: Theme::AURORA_HIGH });
 
     // Each Braille feature gets its own `ctx.layer()`. A Braille cell is 2x4
     // dots but carries one fg colour (ratatui's `PatternGrid` ORs dot bits and
@@ -224,6 +276,28 @@ fn paint_scene(
             );
         }
     }
+
+    // Sun and Moon — bare glyphs, no name, the same treatment the ground
+    // station gets: the shape says what it is (`?` spells it out for anyone
+    // who doesn't recognise `☉`/the phase glyphs on sight), and it keeps two
+    // more live markers from crowding the map with text. Drawn through
+    // `print_marker` rather than a bare `ctx.print` (unlike the station
+    // above) so a marker outside a narrow follow window's pane is silently
+    // skipped instead of drawn at a saturated, wrong column.
+    print_marker(
+        ctx,
+        grid,
+        scene.sun.lon_deg,
+        scene.sun.lat_deg,
+        &MarkerLabel { glyph: "☉", color: Theme::CAUTION, name: "", detail: None },
+    );
+    print_marker(
+        ctx,
+        grid,
+        scene.moon.lon_deg,
+        scene.moon.lat_deg,
+        &MarkerLabel { glyph: scene.moon_glyph, color: Theme::ACCENT, name: "", detail: None },
+    );
 
     // The highlighted launch's pad, drawn before the satellite so the
     // satellite marker wins if the two ever coincide. The label leads with
@@ -290,11 +364,10 @@ fn draw_places(ctx: &mut Context<'_>, grid: &Grid, scene: &Scene<'_>) {
         return;
     }
 
-    // Seed the collision set with the three markers drawn on top of this
-    // layer, so a place label never lands under one. They're laid out a
-    // second time when actually drawn — three items, far cheaper than
-    // reordering the marker block so this layer could see already-drawn
-    // cells.
+    // Seed the collision set with the markers drawn on top of this layer, so
+    // a place label never lands under one. They're laid out a second time
+    // when actually drawn — a handful of items, far cheaper than reordering
+    // the marker block so this layer could see already-drawn cells.
     let mut seed = Claimed::default();
     if let Some((tr, s)) = scene.sat {
         let m = MarkerLabel { glyph: "◆", color: Theme::SAT, name: tr.name(), detail: None };
@@ -309,6 +382,10 @@ fn draw_places(ctx: &mut Context<'_>, grid: &Grid, scene: &Scene<'_>) {
         let m = MarkerLabel { glyph: "◉", color: Theme::PAD, name: &label, detail: Some(&detail) };
         seed.claim(&marker_cells(grid, p.lon, p.lat, &m));
     }
+    let sun_m = MarkerLabel { glyph: "☉", color: Theme::CAUTION, name: "", detail: None };
+    seed.claim(&marker_cells(grid, scene.sun.lon_deg, scene.sun.lat_deg, &sun_m));
+    let moon_m = MarkerLabel { glyph: scene.moon_glyph, color: Theme::ACCENT, name: "", detail: None };
+    seed.claim(&marker_cells(grid, scene.moon.lon_deg, scene.moon.lat_deg, &moon_m));
 
     for place in selected_places(grid, seed) {
         let m = MarkerLabel {
@@ -460,10 +537,17 @@ fn panes(inner: Rect, x: [f64; 2]) -> Vec<Pane> {
 /// also means the follow-mode zoom — half the degrees per cell of the
 /// whole-world view — gets exactly as fine a wash as the whole-world view
 /// does, which a fixed-degree mesh could not offer both at once.
-fn night_wash(grid: &Grid, now: DateTime<Utc>) -> (Vec<(f64, f64)>, Vec<(f64, f64)>) {
+/// Aurora probability (%) thresholds for the three brightening wash tiers —
+/// picked to shade in an oval rather than a blob: low enough at the bottom
+/// that the ring around the auroral zone shows at all, high enough at the
+/// top that only a real substorm lights up bright.
+const AURORA_LOW_PCT: u8 = 10;
+const AURORA_MED_PCT: u8 = 35;
+const AURORA_HIGH_PCT: u8 = 70;
+
+fn night_wash(grid: &Grid, now: DateTime<Utc>, aurora: Option<&AuroraGrid>) -> Wash {
     let sun = SunGeometry::at(now);
-    let mut night = Vec::new();
-    let mut twilight = Vec::new();
+    let mut wash = Wash::default();
     for row in 0..grid.rows() {
         // Clamp guards the globe only — `elevation_deg` needs a real latitude
         // — not the canvas bounds. `view_bounds` never returns a window that
@@ -474,14 +558,33 @@ fn night_wash(grid: &Grid, now: DateTime<Utc>) -> (Vec<(f64, f64)>, Vec<(f64, f6
         for col in 0..grid.cols() {
             let lon = grid.x_of(col);
             let elevation = sun.elevation_deg(lat, lon);
-            if elevation <= CIVIL_TWILIGHT_DEG {
-                night.push((lon, lat));
+            let dark = if elevation <= CIVIL_TWILIGHT_DEG {
+                wash.night.push((lon, lat));
+                true
             } else if elevation <= 0.0 {
-                twilight.push((lon, lat));
+                wash.twilight.push((lon, lat));
+                true
+            } else {
+                false
+            };
+            // The aurora only ever tints a cell the Sun has already put in
+            // shadow — you cannot see an aurora in daylight, and skipping the
+            // lookup on the lit side is also what keeps a whole-world wash
+            // from spending it on every cell rather than the dark half.
+            if !dark {
+                continue;
+            }
+            let Some(prob) = aurora.and_then(|g| g.probability_at(lat, lon)) else { continue };
+            if prob >= AURORA_HIGH_PCT {
+                wash.aurora_high.push((lon, lat));
+            } else if prob >= AURORA_MED_PCT {
+                wash.aurora_med.push((lon, lat));
+            } else if prob >= AURORA_LOW_PCT {
+                wash.aurora_low.push((lon, lat));
             }
         }
     }
-    (night, twilight)
+    wash
 }
 
 fn draw_polyline(ctx: &mut Context<'_>, segments: &[Vec<GeoPoint>], color: Color) {
@@ -760,7 +863,8 @@ mod tests {
         use chrono::TimeZone;
         let g = Grid { inner: Rect::new(0, 0, 72, 36), x: [-180.0, 180.0], y: [-90.0, 90.0] };
         let t = Utc.with_ymd_and_hms(2026, 9, 4, 6, 0, 0).unwrap();
-        let (night, twilight) = night_wash(&g, t);
+        let wash = night_wash(&g, t, None);
+        let (night, twilight) = (&wash.night, &wash.twilight);
 
         let total = usize::from(g.cols()) * usize::from(g.rows());
         assert!(night.len() + twilight.len() <= total);
@@ -825,8 +929,8 @@ mod tests {
         // dropped by ratatui, unshaded, and the bug is back.
         let t = Utc.with_ymd_and_hms(2026, 9, 4, 6, 0, 0).unwrap();
         for g in edge_case_grids() {
-            let (night, twilight) = night_wash(&g, t);
-            for (lon, lat) in night.iter().chain(&twilight) {
+            let wash = night_wash(&g, t, None);
+            for (lon, lat) in wash.night.iter().chain(&wash.twilight) {
                 assert!(
                     *lon >= g.x[0] && *lon <= g.x[1] && *lat >= g.y[0] && *lat <= g.y[1],
                     "sample ({lon}, {lat}) outside bounds x {:?} y {:?}",
@@ -850,11 +954,60 @@ mod tests {
             y: [-41.25, -18.75],
         };
         let t = Utc.with_ymd_and_hms(2026, 9, 4, 6, 0, 0).unwrap();
-        let (night, twilight) = night_wash(&g, t);
+        let wash = night_wash(&g, t, None);
 
         let cells = usize::from(g.cols()) * usize::from(g.rows());
-        assert_eq!(night.len(), cells, "every cell should be full night");
-        assert!(twilight.is_empty(), "window is well past civil twilight");
+        assert_eq!(wash.night.len(), cells, "every cell should be full night");
+        assert!(wash.twilight.is_empty(), "window is well past civil twilight");
+    }
+
+    #[test]
+    fn the_aurora_wash_only_tints_cells_that_are_already_dark() {
+        use chrono::TimeZone;
+        // A grid wide enough to straddle the terminator, so it has both
+        // sunlit and dark cells. Feeding it a probability of 100% everywhere
+        // proves the day-side cells never gain an aurora tint no matter what
+        // the feed says — the wash has to already know a cell is dark before
+        // it ever consults the aurora grid.
+        let g = Grid { inner: Rect::new(0, 0, 60, 30), x: [-180.0, 180.0], y: [-90.0, 90.0] };
+        let t = Utc.with_ymd_and_hms(2026, 9, 4, 12, 0, 0).unwrap();
+        let everywhere = AuroraGrid::uniform(100);
+
+        let wash = night_wash(&g, t, Some(&everywhere));
+        let tinted = wash.aurora_low.len() + wash.aurora_med.len() + wash.aurora_high.len();
+        let dark = wash.night.len() + wash.twilight.len();
+        assert!(tinted > 0, "expected some cells on the night side to tint");
+        assert!(dark > 0, "test grid should also have a sunlit side — fixture is vacuous otherwise");
+        assert!(tinted <= dark, "tinted {tinted} cells but only {dark} were ever dark");
+    }
+
+    /// At 100% everywhere every dark cell should land in the *brightest*
+    /// tier, not merely some tier — pins the threshold comparisons to the
+    /// right direction (`>=`, not `<=`).
+    #[test]
+    fn a_saturated_aurora_grid_puts_every_dark_cell_in_the_brightest_tier() {
+        use chrono::TimeZone;
+        let g = Grid { inner: Rect::new(0, 0, 60, 30), x: [-180.0, 180.0], y: [-90.0, 90.0] };
+        let t = Utc.with_ymd_and_hms(2026, 9, 4, 12, 0, 0).unwrap();
+        let everywhere = AuroraGrid::uniform(100);
+
+        let wash = night_wash(&g, t, Some(&everywhere));
+        let dark = wash.night.len() + wash.twilight.len();
+        assert_eq!(wash.aurora_high.len(), dark);
+        assert!(wash.aurora_low.is_empty() && wash.aurora_med.is_empty());
+    }
+
+    /// A grid that never reaches the low threshold should tint nothing — the
+    /// wash must not light up on noise-level probabilities.
+    #[test]
+    fn a_quiet_aurora_grid_tints_nothing() {
+        use chrono::TimeZone;
+        let g = Grid { inner: Rect::new(0, 0, 60, 30), x: [-180.0, 180.0], y: [-90.0, 90.0] };
+        let t = Utc.with_ymd_and_hms(2026, 9, 4, 12, 0, 0).unwrap();
+        let quiet = AuroraGrid::uniform(AURORA_LOW_PCT - 1);
+
+        let wash = night_wash(&g, t, Some(&quiet));
+        assert!(wash.aurora_low.is_empty() && wash.aurora_med.is_empty() && wash.aurora_high.is_empty());
     }
 
     #[test]
@@ -1327,13 +1480,18 @@ mod tests {
                 footprint,
                 terminator: Vec::new(),
                 places: false,
+                // Parked well away from the 50°N/0–120°E ring under test, so
+                // neither marker can coincidentally share a cell with it.
+                sun: GeoPoint::new(0.0, -170.0, 0.0),
+                moon: GeoPoint::new(0.0, -160.0, 0.0),
+                moon_glyph: "●",
             };
             let mut buf = Buffer::empty(rect);
             Canvas::default()
                 .marker(Marker::Braille)
                 .x_bounds(x)
                 .y_bounds(y)
-                .paint(|ctx| paint_scene(ctx, &grid, &scene, &[], &[]))
+                .paint(|ctx| paint_scene(ctx, &grid, &scene, &Wash::default()))
                 .render(rect, &mut buf);
             buf
         };

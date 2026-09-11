@@ -100,20 +100,20 @@ Almost entirely `main.rs`. Everything but `main.rs` already sits behind
 `predict_passes` needs only a `Tracker` and a `GeoPoint`. With a warm TLE cache
 it works offline.
 
-### 4. Sun and Moon on the map
+### 4. Sun and Moon on the map — landed
 
-`solar::subsolar_point` is computed for the terminator and night wash but never
-drawn; marking it `☀` is a couple of lines. The Moon is more interesting and
-more work: a low-precision lunar ephemeris (Meeus, ~40 lines, arc-minute
-accuracy is plenty at map resolution) gives a `☾` sub-lunar marker and a phase
-readout.
-
-Phase is the useful part rather than decoration — it is what decides whether a
-`★` visible pass is actually worth walking outside for. It pairs with the
-existing naked-eye flag in Passes.
-
-Touches: a new `orbit/lunar.rs` (pure math, no I/O — the rule holds),
-`ui/map.rs`, possibly `ui/panels/passes.rs`.
+Done: `orbit/celestial.rs` adds a low-precision lunar ephemeris (Meeus'
+abridged terms) alongside `orbit::solar`, giving a sublunar point, phase and
+topocentric look angles for the Moon (and the Sun, and any fixed star). The
+map draws `☉` and a phase-glyph Moon marker; the Moon's phase and elevation
+also show as a `MOON` row on Space Weather, since phase is what decides
+whether a `★` visible pass is actually worth walking outside for. The sky
+plot places the same Sun/Moon, plus a small star field (`ui/stars.rs`),
+behind the pass arc at its culmination. Two more small wins landed alongside
+it: the aurora nowcast's full world grid — previously read at one point for
+the `AUR` row — now shades a green oval into the map's night side (`a` to
+toggle); and `Pass` gained `peak_azimuth_deg`, widening a wide pass's compass
+row to `AOS→peak→LOS`.
 
 ### 5. Pass alerts
 

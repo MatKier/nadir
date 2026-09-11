@@ -74,6 +74,7 @@ fn content(app: &App) -> Vec<Line<'static>> {
     row(&mut l, "+ / -", "zoom the follow window in / out (×2 to ×16); - past the");
     text(&mut l, "     widest level drops back to the whole world, + turns follow on");
     row(&mut l, "p", "toggle labelled cities and ground stations on the map");
+    row(&mut l, "a", "toggle the aurora oval on the map");
     row(&mut l, "s", "search Celestrak's catalogue for a satellite, by name or NORAD id");
     row(&mut l, "Enter", "on Tracked: start tracking the highlighted satellite");
     row(&mut l, "d / Del", "on Tracked: drop the highlighted satellite from the list");
@@ -116,6 +117,8 @@ fn content(app: &App) -> Vec<Line<'static>> {
     heading(&mut l, "Map");
     row(&mut l, "◆", "the sub-satellite point — directly beneath the satellite");
     row(&mut l, "▲", "your ground station");
+    row(&mut l, "☉", "the subsolar point — where the Sun is directly overhead");
+    row(&mut l, "○◔◑◕●", "the sublunar point — the marker's own glyph is the Moon's phase");
     row(&mut l, "· / +", "with `p` on: a labelled city / satellite ground station");
     row(&mut l, "bright line", "the next 65 minutes of ground track");
     row(&mut l, "dim line", "the past 35 minutes of ground track");
@@ -123,6 +126,7 @@ fn content(app: &App) -> Vec<Line<'static>> {
     row(&mut l, "amber dots", "the day/night terminator");
     row(&mut l, "dark ground", "the night side of the Earth");
     row(&mut l, "lighter band", "civil twilight — the Sun 0°–6° below the horizon");
+    row(&mut l, "green glow", "with `a` on: the aurora oval, from the OVATION nowcast");
     row(&mut l, "◉", "pad of the highlighted launch, with its provider, site and coordinates — see below");
     text(&mut l, "The map shows the whole world; `f` zooms it to a window centred on");
     text(&mut l, "the satellite, wrapping across the dateline to keep it dead centre.");
@@ -133,6 +137,9 @@ fn content(app: &App) -> Vec<Line<'static>> {
     text(&mut l, "`p` labels prominent cities and ground stations, drawing as many as");
     text(&mut l, "fit without overlapping — so a whole-world map shows only a scattered");
     text(&mut l, "few and more fill in the further `+` zooms in, or `m` widens the map.");
+    text(&mut l, "`a` shades the night side's aurora probability in three brightening");
+    text(&mut l, "green tiers, on by default but drawing nothing until the feed has");
+    text(&mut l, "ever returned data — the header shows `AUR` while it's actually live.");
     text(&mut l, "While NEXT PASSES holds focus this pane shows a sky plot of the");
     text(&mut l, "highlighted pass instead — see below.");
     blank(&mut l);
@@ -156,7 +163,7 @@ fn content(app: &App) -> Vec<Line<'static>> {
     text(&mut l, "equatorial sidereal orbit, GSO the same period but inclined or");
     text(&mut l, "eccentric. A `-P` or `-S` suffix marks a polar or sun-synchronous");
     text(&mut l, "plane, e.g. LEO-P, independent of the regime.");
-    row(&mut l, "APSIS", "perigee × apogee altitude — the orbit's actual shape");
+    row(&mut l, "APSIS", "perigee × apogee altitude and eccentricity — the orbit's shape");
     text(&mut l, "Measured from the WGS-84 equatorial radius, not the local ellipsoid ALT");
     text(&mut l, "uses, so the two can read up to ~20 km apart away from the equator.");
     row(&mut l, "REV", "approximate revolution number since launch");
@@ -191,9 +198,11 @@ fn content(app: &App) -> Vec<Line<'static>> {
     heading(&mut l, "Next passes");
     text(&mut l, "Passes peaking above 10° elevation within the next 96h, recomputed");
     text(&mut l, "every 20s. Each row: date, AOS–LOS in local time, duration in");
-    text(&mut l, "minutes, peak elevation, and the AOS→LOS compass azimuths. The date");
-    text(&mut l, "spells itself out in full on a wide terminal and shortens a rung at");
-    text(&mut l, "a time as the right column narrows, down to a bare weekday.");
+    text(&mut l, "minutes, peak elevation, and the AOS→LOS compass azimuths — widened");
+    text(&mut l, "to AOS→peak→LOS when the culmination bearing doesn't already read the");
+    text(&mut l, "same compass point as where it rises or sets. The date spells itself");
+    text(&mut l, "out in full on a wide terminal and shortens a rung at a time as the");
+    text(&mut l, "right column narrows, down to a bare weekday.");
     row(&mut l, "★", "visible to the naked eye — satellite sunlit while you're in darkness");
     text(&mut l, "A footer appears when the ACC timing error above exceeds a second,");
     text(&mut l, "bounding how far the AOS/LOS times on screen could slip.");
@@ -205,6 +214,9 @@ fn content(app: &App) -> Vec<Line<'static>> {
     text(&mut l, "map pane then shows a sky plot of it: a polar chart with the zenith");
     text(&mut l, "at the centre, the horizon at the rim, north up, and elevation rings");
     text(&mut l, "at 30° and 60°.");
+    row(&mut l, "· name", "a star, placed as it will actually be at the pass's culmination");
+    text(&mut l, "     the brightest few dozen, dimmest first so the arc always wins");
+    row(&mut l, "☉ / phase glyph", "the Sun / Moon, likewise at culmination, above the horizon");
     row(&mut l, "▲ / ▼", "the pass rising (AOS) and setting (LOS), on the horizon rim");
     row(&mut l, "◇", "culmination, labelled with its peak elevation");
     row(&mut l, "◆", "the satellite itself — only while the pass is under way");
@@ -222,10 +234,13 @@ fn content(app: &App) -> Vec<Line<'static>> {
     row(&mut l, "Kp", "planetary K-index 0–9; sparkline is the last ~3 days of samples");
     text(&mut l, "     green below 4, amber from 4, red from 5 (storm level)");
     row(&mut l, "WIND", "solar wind bulk proton speed, km/s");
-    row(&mut l, "Bz", "north–south interplanetary field, nT — strongly southward drives");
-    text(&mut l, "     aurora; amber at ≤ −5, red at ≤ −10");
+    row(&mut l, "Bt / Bz", "interplanetary field magnitude / its north–south component, nT");
+    text(&mut l, "     strongly southward Bz drives aurora; amber at ≤ −5, red at ≤ −10");
     row(&mut l, "STORM", "NOAA scales 0–5: R radio blackouts, S radiation storms, G geomagnetic");
     row(&mut l, "AUR", "OVATION aurora nowcast probability overhead at your ground station");
+    row(&mut l, "MOON", "phase, illuminated % and elevation from your ground station");
+    text(&mut l, "     local math, not a feed — never stale, and it's what decides whether");
+    text(&mut l, "     a ★ naked-eye pass in Next Passes is worth walking outside for");
     text(&mut l, "An age marker under the panel title shows how stale the Kp/wind/storm");
     text(&mut l, "feed is (the aurora nowcast fetches separately, on its own schedule).");
     blank(&mut l);
