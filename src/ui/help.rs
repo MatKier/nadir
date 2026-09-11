@@ -170,9 +170,9 @@ fn content(app: &App) -> Vec<Line<'static>> {
     text(&mut l, "up once from SatNOGS DB when a satellite is first tracked — press T to");
     text(&mut l, "choose from what it returns, t to step between them — and cached, never");
     text(&mut l, "polled again. Δf = -f0·ṙ/c: a closing pass shifts the received");
-    text(&mut l, "frequency up, so you tune above the nominal. A wide terminal labels");
-    text(&mut l, "both frequencies \"MHz\" and the received one \"rx\"; a narrow one drops");
-    text(&mut l, "those and the mode a step at a time.");
+    text(&mut l, "frequency up, so you tune above the nominal. A wide terminal");
+    text(&mut l, "labels both frequencies \"MHz\" and the received one \"rx\"; a narrow");
+    text(&mut l, "one drops those and the mode a step at a time.");
     row(&mut l, "TLE", "time from the element-set epoch — amber past 36h, red past 72h");
     text(&mut l, "Names the epoch inline — \"18h since epoch 2026-09-06 23:11Z\" (UTC) on a wide");
     text(&mut l, "terminal, shortening to \"18h since 09-06 23:11Z\" as the panel narrows. Reads");

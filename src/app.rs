@@ -628,10 +628,11 @@ impl App {
             // no downlink frequencies on file: kick off the one-shot SatNOGS
             // lookup in the background (a note tells the user `T` picks one).
             // A satellite that already has transmitters, or one already looked
-            // up, never re-queries — the config is authoritative and SatNOGS
-            // is a small volunteer service. Startup `--sat` resolution and the
-            // first-run default go through `Config::track` directly, not here,
-            // so a fresh install makes no unasked-for request on frame one.
+            // up, never re-queries — the cache is authoritative once it has
+            // run, and SatNOGS is a small volunteer service. Startup `--sat`
+            // resolution and the first-run default go through `Config::track`
+            // directly, not here, so a fresh install makes no unasked-for
+            // request on frame one.
             if self.config.transmitters(norad_id).is_empty()
                 && self.looked_up.insert(norad_id)
                 && !self.config.offline
@@ -907,6 +908,7 @@ impl App {
 /// Entry point from `main`. Owns the terminal for the duration of the session.
 pub async fn run(mut config: Config) -> Result<()> {
     let cache = Cache::open().context("opening the disk cache")?;
+    config.load_downlinks(&cache);
     let http = api::client()?;
 
     // An explicit --location always wins: resolve it and persist the result.
