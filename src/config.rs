@@ -16,9 +16,9 @@ pub const DEFAULT_SAT: u64 = 25544;
 
 /// How often each timer-driven feed refetches, as written under `[intervals]`
 /// in `config.toml`. Every field is a lower bound on how much upstream traffic
-/// nadir generates, so the shipped defaults double as the floors enforced by
-/// [`Intervals::clamped`] — a config file can lengthen an interval freely but
-/// only shorten it so far.
+/// nadir generates, and each default already sits at or above its own floor
+/// (enforced by [`Intervals::clamped`]) — a config file can lengthen an
+/// interval freely but only shorten it so far.
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub struct Intervals {
     /// How long a cached element set is trusted before it's worth refetching.
@@ -118,7 +118,7 @@ impl Intervals {
 /// positive and its unit has to be explicit.
 ///
 /// This shares its unit vocabulary with the clock-scrub parser
-/// (`simclock::parse_relative`) so `[intervals]` and the in-app `t` prompt read
+/// (`simclock::parse_relative`) so `[intervals]` and the in-app `g` prompt read
 /// alike — but deliberately not its implementation: that one is signed, yields
 /// a `chrono::Duration`, and carries a 100-year cap and clock-scrub error prose
 /// that have no place here.

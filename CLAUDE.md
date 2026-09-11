@@ -7,8 +7,8 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 ```sh
 cargo build --release
 cargo run -- --offline               # debug run; --offline makes zero network requests
-cargo test                           # 135 unit tests, all hermetic
-cargo test -- --ignored              # 3 live tests that hit Celestrak / WhereTheISS.at
+cargo test                           # unit tests, all hermetic
+cargo test -- --ignored              # + the live tests (Celestrak / SatNOGS / WhereTheISS.at)
 cargo test rank_by_name              # one test, by name substring
 cargo test --lib config::            # one module's tests
 ```
@@ -19,10 +19,9 @@ is set entirely by dependencies — ratatui 0.30 and its `time`/`darling` deps,
 plus the `icu_*` crates reqwest pulls in through `url`/`idna`. `time` uses
 let-chains, so 1.87 fails to compile even with `--ignore-rust-version`. nadir's
 own code is far below that line: the newest std API it touches is
-`Option::is_none_or` (1.82, used in `app.rs` and `ui/mod.rs`), and it is
-edition 2021 with no let-chains or async closures. So raising MSRV is a
-dependency decision; don't reach for a newer std API without checking it
-against the declared floor.
+`Option::is_none_or` (1.82), and it is edition 2021 with no let-chains or async
+closures. So raising MSRV is a dependency decision; don't reach for a newer std
+API without checking it against the declared floor.
 
 Running the TUI takes over the terminal and only quits on a keypress, so prefer
 `cargo test` / `cargo build` for verification; use `--offline` when you do need
@@ -70,7 +69,7 @@ focused panel's feed to refetch. The TLE task is the exception: it wakes on the
 either way, so panels warm-start from disk instead of sitting on a placeholder.
 
 Adding a feed touches six places: a `Feed<T>` constructor, a task fn, a
-`Notifiers` field, the chip list in `ui::status_bar`, a field on
+`Notifiers` field, the chip list in `status_bar` (`src/ui/mod.rs`), a field on
 `config::Intervals` (its default, its floor, and the `Duration` threaded into
 the task via `spawn_fetch_tasks` — the chip derives its colour thresholds from
 that same value), and — if it is cached — `load_all_from_cache`.
@@ -82,10 +81,10 @@ keys and the digit in each panel header; `key()` and `from_key()` both derive
 from array position and tests in `app.rs` enforce the round-trip. Reordering or
 adding a panel means editing `ALL` and nothing else on the key-binding side —
 but panel *numbers also appear in prose* in `src/ui/help.rs` and in README's key
-table; update both. The bottom-bar hint is focus-scoped in `ui::key_hints`: it
-no longer prints the `1`–`6` digits, but a panel key added there (like Tracked's
-`Enter`/`d` or Telemetry's `t`/`T`) needs a `match focus` arm so the bar
-advertises it.
+table; update both. The bottom-bar hint is focus-scoped in `key_hints`
+(`src/ui/mod.rs`): it no longer prints the `1`–`6` digits, but a panel key added
+there (like Tracked's `Enter`/`d` or Telemetry's `t`/`T`) needs a `match focus`
+arm so the bar advertises it.
 
 `ui::draw` is the sole render entry point, called every 250 ms by `render_loop`.
 It takes the `RwLock` read guard once per frame and drops it before drawing the

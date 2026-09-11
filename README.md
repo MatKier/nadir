@@ -54,9 +54,12 @@ the dashboard alone. Every panel warm-starts from the disk cache at launch, so
 nothing sits on a placeholder waiting for the session's first fetch.
 
 `--offline` makes no network requests at all and loads whatever each source last
-cached. The map keeps tracking from the last cached TLE. Only the catalogue name
-search is unavailable offline — a NORAD id still switches satellites, since
-nothing has to be looked up first.
+cached. The map keeps tracking from the last cached TLE. What needs the network
+and so is unavailable offline: the catalogue name search, the SatNOGS downlink
+lookup, `--location`, and a `--sat` name (both of the latter are ignored with a
+warning). A NORAD id still switches satellites, since nothing has to be looked
+up first, and an already-cached downlink still drives `DOPP` — the Doppler
+shift itself is local math.
 
 ## Installing
 
@@ -178,7 +181,7 @@ and will not work here.
 | `g` | go to a time — `2026-09-08 04:30`, `04:30`, or an offset like `+90m` |
 | `0` | snap the clock back to now, running at 1× |
 | `?` | help — a scrollable in-app reference to every field, symbol and status chip |
-| `q` / `Esc` | quit |
+| `q` / `Esc` / `Ctrl+C` | quit — `Ctrl+C` works from anywhere, including inside a prompt |
 
 Focus affects behaviour as well as appearance. `j`/`k` scroll and highlight a row
 in whichever panel has focus (Tracked, Passes and Launches have scrollable
@@ -304,12 +307,14 @@ The hermetic suite covers the geodesy, the SGP4 pipeline and pass prediction
 against a fixed element set, plus the config store, catalogue-search ranking and
 panel formatting.
 
-The live tests are the ones worth running when the orbital mechanics change: one
-propagates a freshly fetched TLE and asserts the result agrees with an
-independent feed (WhereTheISS.at) to within 25 km and matches its eclipse state —
-a check that the maths is correct rather than only internally consistent. The
-others pin how Celestrak actually answers a catalogue search, including the 404
-it returns for a name that matches nothing.
+The live tests are the ones worth running when the orbital mechanics or a live
+integration change: one propagates a freshly fetched TLE and asserts the result
+agrees with an independent feed (WhereTheISS.at) to within 25 km and matches its
+eclipse state — a check that the maths is correct rather than only internally
+consistent. Two pin how Celestrak actually answers a catalogue search, including
+the 404 it returns for a name that matches nothing. Two more pin how SatNOGS DB
+answers a downlink lookup, including that a satellite with no amateur radio
+comes back as an empty list, not an error.
 
 ## Architecture
 

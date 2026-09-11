@@ -76,12 +76,13 @@ fn content(app: &App) -> Vec<Line<'static>> {
     row(&mut l, "p", "toggle labelled cities and ground stations on the map");
     row(&mut l, "s", "search Celestrak's catalogue for a satellite, by name or NORAD id");
     row(&mut l, "Enter", "on Tracked: start tracking the highlighted satellite");
-    row(&mut l, "d", "on Tracked: drop the highlighted satellite from the list");
+    row(&mut l, "d / Del", "on Tracked: drop the highlighted satellite from the list");
     row(&mut l, "r", "refresh the focused panel's feed(s) now");
     row(&mut l, "t", "step to the next configured downlink (drives the DOPP row)");
     row(&mut l, "T", "pick a downlink / look one up on SatNOGS DB for this satellite");
     row(&mut l, "?", "toggle this help");
     row(&mut l, "q / Esc", "quit (Esc closes this help first)");
+    row(&mut l, "Ctrl+C", "quit from anywhere, including a prompt or this help");
     blank(&mut l);
 
     heading(&mut l, "Time");
@@ -175,8 +176,9 @@ fn content(app: &App) -> Vec<Line<'static>> {
     text(&mut l, "one drops those and the mode a step at a time.");
     row(&mut l, "TLE", "time from the element-set epoch — amber past 36h, red past 72h");
     text(&mut l, "Names the epoch inline — \"18h since epoch 2026-09-06 23:11Z\" (UTC) on a wide");
-    text(&mut l, "terminal, shortening to \"18h since 09-06 23:11Z\" as the panel narrows. Reads");
-    text(&mut l, "\"before\" instead of \"since\" when the clock is scrubbed ahead of the epoch.");
+    text(&mut l, "terminal, shortening to \"18h since 09-06 23:11Z\" and then to a bare \"18h old\"");
+    text(&mut l, "as the panel narrows. Reads \"before\"/\"ahead\" instead of \"since\"/\"old\" when");
+    text(&mut l, "the clock is scrubbed ahead of the epoch.");
     row(&mut l, "ACC", "modelled position error, and the along-track timing error it implies");
     text(&mut l, "Built from the element set's own drag term (B*) — re-propagated with B*");
     text(&mut l, "nudged 10% and the two positions differenced — floored by a per-regime");
@@ -270,7 +272,7 @@ fn content(app: &App) -> Vec<Line<'static>> {
             ),
         );
     }
-    text(&mut l, "Those cadences are the defaults; set your own under [intervals] in");
+    text(&mut l, "Those are the cadences in effect; set your own under [intervals] in");
     text(&mut l, "config.toml (\"12h\", \"5m\" …). A feed whose last fetch attempt failed");
     text(&mut l, "reads at least amber whatever its age, and logs why under Recent");
     text(&mut l, "activity.");

@@ -49,7 +49,7 @@ pub fn draw(
 
     if passes.is_empty() {
         frame.render_widget(
-            Paragraph::new(dim("  no passes above 10° in the next 96 h"))
+            Paragraph::new(dim("  no passes peaking above 10° in the next 96 h"))
                 .block(block)
                 .wrap(Wrap { trim: true }),
             area,
