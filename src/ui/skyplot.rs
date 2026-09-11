@@ -10,20 +10,31 @@
 //! features must not share a layer, and why `ctx.layer()` is only called after
 //! something actually drew).
 
+use chrono::{DateTime, Utc};
 use ratatui::layout::Rect;
 use ratatui::style::{Color, Style};
 use ratatui::symbols::Marker;
 use ratatui::text::Span;
-use ratatui::widgets::canvas::{Canvas, Circle, Context, Line as CanvasLine};
+use ratatui::widgets::canvas::{Canvas, Circle, Context, Line as CanvasLine, Points};
 use ratatui::widgets::Paragraph;
 use ratatui::Frame;
 
 use crate::app::{App, Panel};
 use crate::geo::{look_angles, GeoPoint, LookAngles};
-use crate::orbit::{sample_pass, sky_sample, Pass, SatState, SkySample, Tracker};
+use crate::orbit::{
+    moon_look_angles, moon_phase, sample_pass, sky_sample, star_look_angles, sun_look_angles, Pass,
+    SatState, SkySample, Tracker,
+};
 use crate::ui::canvas::{Grid, DOTS_X, DOTS_Y};
 use crate::ui::panels::{compass, local_date, local_hm, local_hms, split_footer};
+use crate::ui::stars::STARS;
 use crate::ui::{fitting_hint, panel_block, Highlight, Theme, PANEL_CHROME};
+
+/// The brightest stars this plot will ever put a *name* beside — beyond this
+/// many the disc is small enough that more labels would just overlap. Every
+/// star in [`STARS`] still gets its bare mark; this only caps how many also
+/// earn a name, in the brightest-first order the table is kept sorted in.
+const MAX_STAR_LABELS: usize = 6;
 
 /// Time samples across the arc. ~5 s apart on a ten-minute pass — fine enough
 /// that the sunlit→eclipsed transition lands within a few seconds and the
@@ -65,6 +76,17 @@ pub fn draw(
     let live = live_look(pass, &station, state);
     let footer = plot_footer(pass);
 
+    // Sun, Moon and the star field, all placed at the pass's own culmination
+    // rather than the render instant: this panel is normally about a pass
+    // still ahead, so "what's behind the arc" means the sky at the time of
+    // the pass, not the sky right now. `sky::LookAngles` for a body below the
+    // horizon (`elevation_deg < 0`) is deliberately not drawn — `project`
+    // clamps anything past the horizon onto the rim, which would misplace it
+    // rather than just omit it.
+    let sun = sun_look_angles(&station, pass.peak);
+    let moon = moon_look_angles(&station, pass.peak);
+    let moon_glyph = moon_phase(pass.peak).glyph();
+
     // A one-row footer under the disc, but only when the pane can spare it —
     // a short map needs every row for the disc to stay round. `split_footer`
     // wants the block already drawn (above) so it splits the *inner* rect, the
@@ -73,11 +95,12 @@ pub fn draw(
 
     let (x_bounds, y_bounds) = disc_bounds(disc_area);
     let grid = Grid { inner: disc_area, x: x_bounds, y: y_bounds };
+    let sky = Sky { pass_time: pass.peak, station: &station, sun, moon, moon_glyph };
     let canvas = Canvas::default()
         .marker(Marker::Braille)
         .x_bounds(x_bounds)
         .y_bounds(y_bounds)
-        .paint(|ctx| paint(ctx, &grid, pass, &samples, peak, live));
+        .paint(|ctx| paint(ctx, &grid, pass, &samples, peak, live, &sky));
     frame.render_widget(canvas, disc_area);
 
     if let Some(fa) = footer_area {
@@ -140,6 +163,20 @@ fn disc_bounds(area: Rect) -> ([f64; 2], [f64; 2]) {
     }
 }
 
+/// The non-satellite sky at the pass's own culmination — the Sun, the Moon
+/// and (via [`STARS`]) the star field, gathered once in [`draw`] so `paint`
+/// takes no ground station or time of its own. `pass_time` and `station` are
+/// what [`draw_stars`] samples [`STARS`] against; `sun`/`moon` are already
+/// resolved because [`sun_look_angles`]/[`moon_look_angles`] are one-shot
+/// calls, not a per-star loop.
+struct Sky<'a> {
+    pass_time: DateTime<Utc>,
+    station: &'a GeoPoint,
+    sun: LookAngles,
+    moon: LookAngles,
+    moon_glyph: &'static str,
+}
+
 fn paint(
     ctx: &mut Context<'_>,
     grid: &Grid,
@@ -147,6 +184,7 @@ fn paint(
     samples: &[SkySample],
     peak: Option<SkySample>,
     live: Option<LookAngles>,
+    sky: &Sky<'_>,
 ) {
     // Elevation rings — the 0° horizon rim, then 30° and 60°. Reference
     // scenery, so PLACE, the same neutral slate the map's place layer uses.
@@ -163,6 +201,18 @@ fn paint(
         });
     }
     ctx.layer();
+
+    // The star field and the Sun/Moon, drawn before the arc so nothing this
+    // panel is actually about — the pass — ever sits under reference sky.
+    draw_stars(ctx, grid, sky.pass_time, sky.station);
+    if sky.sun.elevation_deg >= 0.0 {
+        let (x, y) = project(sky.sun.azimuth_deg, sky.sun.elevation_deg);
+        grid.print_dot(ctx, x, y, Span::styled("☉", Style::new().fg(Theme::CAUTION)));
+    }
+    if sky.moon.elevation_deg >= 0.0 {
+        let (x, y) = project(sky.moon.azimuth_deg, sky.moon.elevation_deg);
+        grid.print_dot(ctx, x, y, Span::styled(sky.moon_glyph, Style::new().fg(Theme::ACCENT)));
+    }
 
     // The arc in two passes so the two colours never fuse in a shared braille
     // cell: eclipsed spans (dim) first, then sunlit (bright) on its own
@@ -243,6 +293,56 @@ fn draw_arc(ctx: &mut Context<'_>, samples: &[SkySample], want: bool, color: Col
         drew = true;
     }
     drew
+}
+
+/// The star field: every [`STARS`] entry above the local horizon at `time`
+/// gets a bare dot in one shared braille layer, so — like the coastline and
+/// the ground track on the map — it sits under whatever draws after it, and
+/// the arc always wins where the two coincide. The brightest
+/// [`MAX_STAR_LABELS`] of those visible also get their name, printed as a
+/// label so it stays legible over the arc the way every other mark on this
+/// plot does — labels are drawn after every layer regardless of call order
+/// (see `print_marker`'s note in `ui::map`), so a name here can only ever sit
+/// on top, never under. `STARS` is kept sorted brightest first, so walking it
+/// in order already visits stars in the order worth labelling.
+fn draw_stars(ctx: &mut Context<'_>, grid: &Grid, time: DateTime<Utc>, station: &GeoPoint) {
+    let visible: Vec<(&'static crate::ui::stars::Star, f64, f64)> = STARS
+        .iter()
+        .filter_map(|s| {
+            let la = star_look_angles(s.ra_deg, s.dec_deg, station, time);
+            (la.elevation_deg >= 0.0).then_some((s, la.azimuth_deg, la.elevation_deg))
+        })
+        .collect();
+
+    let points: Vec<(f64, f64)> = visible.iter().map(|&(_, az, el)| project(az, el)).collect();
+    if !points.is_empty() {
+        ctx.draw(&Points { coords: &points, color: Theme::PLACE });
+        ctx.layer();
+    }
+
+    // A lighter stand-in for the map's full label-collision machinery
+    // (`ui::map::Claimed`): a handful of names on one small disc, not dozens
+    // on a scrolling world map, so a flat "too close to an already-placed
+    // label" check is enough — skipped stars keep their bare dot from the
+    // layer above, just no name.
+    let mut claimed: Vec<(u16, u16)> = Vec::new();
+    for (star, az, el) in &visible {
+        if claimed.len() >= MAX_STAR_LABELS {
+            break;
+        }
+        let (x, y) = project(*az, *el);
+        let (col, row) = (grid.dot_col_of(x), grid.dot_row_of(y));
+        if claimed.iter().any(|&(c, r)| c.abs_diff(col) < 4 && r.abs_diff(row) < 2) {
+            continue;
+        }
+        claimed.push((col, row));
+        grid.print_dot(
+            ctx,
+            x,
+            y,
+            Span::styled(format!("· {}", star.name), Style::new().fg(Theme::PLACE)),
+        );
+    }
 }
 
 /// `SKY · pass 2 of 7`, plus ` · ★` when the pass is naked-eye and the header
@@ -406,19 +506,30 @@ mod tests {
             peak_elevation_deg: 90.0,
             aos_azimuth_deg: 90.0,
             los_azimuth_deg: 180.0,
+            peak_azimuth_deg: 135.0,
             visible: true,
         };
 
         let rect = Rect::new(0, 0, 40, 20);
         let (x, y) = disc_bounds(rect);
         let grid = Grid { inner: rect, x, y };
+        let station = crate::orbit::test_station();
+        // Sun and Moon held below the horizon so they draw nothing here —
+        // this test is about the arc, not the sky behind it.
+        let sky = Sky {
+            pass_time: now,
+            station: &station,
+            sun: LookAngles { azimuth_deg: 0.0, elevation_deg: -10.0, range_km: 0.0 },
+            moon: LookAngles { azimuth_deg: 0.0, elevation_deg: -10.0, range_km: 0.0 },
+            moon_glyph: "●",
+        };
         let render = |live: Option<LookAngles>| {
             let mut buf = Buffer::empty(rect);
             Canvas::default()
                 .marker(Marker::Braille)
                 .x_bounds(x)
                 .y_bounds(y)
-                .paint(|ctx| paint(ctx, &grid, &pass, &samples, None, live))
+                .paint(|ctx| paint(ctx, &grid, &pass, &samples, None, live, &sky))
                 .render(rect, &mut buf);
             buf
         };
@@ -445,18 +556,27 @@ mod tests {
             peak_elevation_deg: 80.0,
             aos_azimuth_deg: 90.0,
             los_azimuth_deg: 180.0,
+            peak_azimuth_deg: 135.0,
             visible: true,
         };
         let rect = Rect::new(0, 0, 40, 20);
         let (x, y) = disc_bounds(rect);
         let grid = Grid { inner: rect, x, y };
+        let station = crate::orbit::test_station();
+        let sky = Sky {
+            pass_time: now,
+            station: &station,
+            sun: LookAngles { azimuth_deg: 0.0, elevation_deg: -10.0, range_km: 0.0 },
+            moon: LookAngles { azimuth_deg: 0.0, elevation_deg: -10.0, range_km: 0.0 },
+            moon_glyph: "●",
+        };
         let render = |live: Option<LookAngles>| {
             let mut buf = Buffer::empty(rect);
             Canvas::default()
                 .marker(Marker::Braille)
                 .x_bounds(x)
                 .y_bounds(y)
-                .paint(|ctx| paint(ctx, &grid, &pass, &[], None, live))
+                .paint(|ctx| paint(ctx, &grid, &pass, &[], None, live, &sky))
                 .render(rect, &mut buf);
             buf
         };
@@ -492,5 +612,103 @@ mod tests {
                 pair[0],
             );
         }
+    }
+
+    /// A render harness for the Sun/Moon markers: a minimal pass and disc,
+    /// with `sun`/`moon` set by the caller so each case controls exactly one
+    /// body's elevation.
+    fn render_sky(sky: &Sky<'_>) -> ratatui::buffer::Buffer {
+        use ratatui::widgets::Widget;
+        let pass = Pass {
+            aos: sky.pass_time,
+            los: sky.pass_time + chrono::Duration::minutes(6),
+            peak: sky.pass_time + chrono::Duration::minutes(3),
+            peak_elevation_deg: 45.0,
+            aos_azimuth_deg: 90.0,
+            los_azimuth_deg: 180.0,
+            peak_azimuth_deg: 135.0,
+            visible: true,
+        };
+        let rect = Rect::new(0, 0, 40, 20);
+        let (x, y) = disc_bounds(rect);
+        let grid = Grid { inner: rect, x, y };
+        let mut buf = ratatui::buffer::Buffer::empty(rect);
+        Canvas::default()
+            .marker(Marker::Braille)
+            .x_bounds(x)
+            .y_bounds(y)
+            .paint(|ctx| paint(ctx, &grid, &pass, &[], None, None, sky))
+            .render(rect, &mut buf);
+        buf
+    }
+
+    /// `☉` only appears while the Sun is above the local horizon — below it,
+    /// `project` would clamp it onto the rim as though it had just risen,
+    /// which is exactly the misplacement this guards against.
+    #[test]
+    fn the_sun_marker_is_drawn_only_above_the_horizon() {
+        let now = chrono::Utc::now();
+        let station = crate::orbit::test_station();
+        let has_sun = |b: &ratatui::buffer::Buffer| b.content.iter().any(|c| c.symbol() == "☉");
+
+        let below = Sky {
+            pass_time: now,
+            station: &station,
+            sun: LookAngles { azimuth_deg: 90.0, elevation_deg: -5.0, range_km: 0.0 },
+            moon: LookAngles { azimuth_deg: 0.0, elevation_deg: -90.0, range_km: 0.0 },
+            moon_glyph: "●",
+        };
+        assert!(!has_sun(&render_sky(&below)), "no Sun marker while it's below the horizon");
+
+        let above = Sky { sun: LookAngles { elevation_deg: 20.0, ..below.sun }, ..below };
+        assert!(has_sun(&render_sky(&above)), "a Sun marker once it's up");
+    }
+
+    /// The Moon marker draws its phase glyph, and (like the Sun) only above
+    /// the horizon.
+    #[test]
+    fn the_moon_marker_draws_its_phase_glyph_only_above_the_horizon() {
+        let now = chrono::Utc::now();
+        let station = crate::orbit::test_station();
+        let has_glyph =
+            |b: &ratatui::buffer::Buffer, g: &str| b.content.iter().any(|c| c.symbol() == g);
+
+        let below = Sky {
+            pass_time: now,
+            station: &station,
+            sun: LookAngles { azimuth_deg: 0.0, elevation_deg: -90.0, range_km: 0.0 },
+            moon: LookAngles { azimuth_deg: 200.0, elevation_deg: -3.0, range_km: 385_000.0 },
+            moon_glyph: "◕",
+        };
+        assert!(!has_glyph(&render_sky(&below), "◕"), "no Moon marker while it's below the horizon");
+
+        let above = Sky { moon: LookAngles { elevation_deg: 15.0, ..below.moon }, ..below };
+        assert!(has_glyph(&render_sky(&above), "◕"), "the Moon marker once it's up, in its own phase glyph");
+    }
+
+    /// `draw_stars` has to survive a real pass (not a synthetic one), and put
+    /// at least one dot on a disc that spans a whole hemisphere — some star
+    /// out of forty-odd is above the horizon at any given instant.
+    #[test]
+    fn draw_stars_marks_at_least_one_star_above_the_horizon() {
+        use ratatui::buffer::Buffer;
+        use ratatui::widgets::Widget;
+
+        let (_, station, pass) = iss_pass_over_munich();
+        let rect = Rect::new(0, 0, 60, 30);
+        let (x, y) = disc_bounds(rect);
+        let grid = Grid { inner: rect, x, y };
+        let mut buf = Buffer::empty(rect);
+        Canvas::default()
+            .marker(Marker::Braille)
+            .x_bounds(x)
+            .y_bounds(y)
+            .paint(|ctx| draw_stars(ctx, &grid, pass.peak, &station))
+            .render(rect, &mut buf);
+
+        assert!(
+            buf.content.iter().any(|c| c.fg == Theme::PLACE),
+            "expected at least one star dot above the horizon"
+        );
     }
 }

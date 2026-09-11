@@ -2,11 +2,15 @@
 //! pass prediction. None of this touches the network — a cached TLE is enough.
 
 pub mod accuracy;
+pub mod celestial;
 pub mod passes;
 pub mod propagate;
 pub mod solar;
 
 pub use accuracy::{Accuracy, Confidence};
+pub use celestial::{
+    moon_look_angles, moon_phase, star_look_angles, sublunar_point, sun_look_angles, MoonPhase,
+};
 pub use passes::{predict_passes, sample_pass, sky_sample, Pass, SkySample};
 pub use propagate::{OrbitClass, OrbitPlane, OrbitShape, SatState, Tracker};
 

@@ -145,6 +145,14 @@ impl AuroraGrid {
         let lat_idx = ((lat_deg + 90.0).round() as i64).clamp(0, 180) as usize;
         self.prob.get(lon_idx).and_then(|col| col.get(lat_idx)).copied()
     }
+
+    /// A grid reporting `pct` everywhere — lets a test drive the map's
+    /// aurora wash (`ui::map::night_wash`) without going through
+    /// `fetch_aurora`'s JSON parsing.
+    #[cfg(test)]
+    pub(crate) fn uniform(pct: u8) -> Self {
+        AuroraGrid { prob: vec![vec![pct; 181]; 360] }
+    }
 }
 
 /// Fetch and index the OVATION aurora nowcast (~900 kB payload).

@@ -15,17 +15,38 @@ pub fn sun_ecef_unit(subsolar: GeoPoint) -> [f64; 3] {
     radial_unit(subsolar.lat_deg, subsolar.lon_deg)
 }
 
-/// The subsolar point (Sun in the zenith) at `time`.
-pub fn subsolar_point(time: DateTime<Utc>) -> GeoPoint {
-    let jd = time.timestamp_millis() as f64 / 86_400_000.0 + 2_440_587.5;
-    let n = jd - 2_451_545.0;
-
+/// The Sun's mean geocentric ecliptic longitude at `time`, in degrees, folded
+/// into `[0, 360)`. Factored out of [`subsolar_point`] so
+/// [`crate::orbit::celestial`] can read the same figure for the Moon's
+/// phase — the phase angle is just the Moon's ecliptic longitude minus this
+/// one.
+pub(crate) fn sun_ecliptic_longitude_deg(time: DateTime<Utc>) -> f64 {
+    let n = days_since_j2000(time);
     let mean_long = (280.460 + 0.985_647_4 * n).rem_euclid(360.0);
     let mean_anom = (357.528 + 0.985_600_3 * n).rem_euclid(360.0).to_radians();
+    (mean_long + 1.915 * mean_anom.sin() + 0.020 * (2.0 * mean_anom).sin()).rem_euclid(360.0)
+}
 
-    let ecliptic_long =
-        (mean_long + 1.915 * mean_anom.sin() + 0.020 * (2.0 * mean_anom).sin()).to_radians();
-    let obliquity = (23.439 - 3.6e-7 * n).to_radians();
+/// Days since the J2000.0 epoch (2000-01-01 12:00 UTC) — the time argument
+/// every low-precision series here and in [`crate::orbit::celestial`] is
+/// built from.
+pub(crate) fn days_since_j2000(time: DateTime<Utc>) -> f64 {
+    let jd = time.timestamp_millis() as f64 / 86_400_000.0 + 2_440_587.5;
+    jd - 2_451_545.0
+}
+
+/// The obliquity of the ecliptic at `time`, in radians — shared by
+/// [`subsolar_point`] and [`crate::orbit::celestial::sublunar_point`], since
+/// both rotate an ecliptic latitude/longitude into equatorial declination/
+/// right ascension through the same tilt.
+pub(crate) fn obliquity_rad(time: DateTime<Utc>) -> f64 {
+    (23.439 - 3.6e-7 * days_since_j2000(time)).to_radians()
+}
+
+/// The subsolar point (Sun in the zenith) at `time`.
+pub fn subsolar_point(time: DateTime<Utc>) -> GeoPoint {
+    let ecliptic_long = sun_ecliptic_longitude_deg(time).to_radians();
+    let obliquity = obliquity_rad(time);
 
     let declination = (obliquity.sin() * ecliptic_long.sin()).asin();
     let right_ascension = (obliquity.cos() * ecliptic_long.sin()).atan2(ecliptic_long.cos());

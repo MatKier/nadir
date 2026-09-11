@@ -6,6 +6,7 @@ mod map;
 mod panels;
 mod places;
 mod skyplot;
+mod stars;
 
 /// The tightest follow-mode zoom index, re-exported so `App::zoom_in` can
 /// saturate against it without `mod map` being made public.
@@ -55,6 +56,17 @@ impl Theme {
     // or the coastline stops reading as land against them.
     pub const NIGHT: Color = Color::Rgb(22, 26, 42);
     pub const TWILIGHT: Color = Color::Rgb(38, 44, 66);
+    // The `a` aurora overlay's three brightening tiers — a background-wash
+    // colour, not a foreground glyph hue, so this doesn't spend one of the
+    // map's scarce braille lanes (see FOOTPRINT's note): it rides the same
+    // `Marker::Block` layer NIGHT/TWILIGHT already paint on, and a `Block`
+    // cell is a solid fill a later draw call simply overwrites, so the
+    // brightest tier that touches a cell is always what shows. Green because
+    // that's the OVATION nowcast's own colour convention and the aurora's
+    // most commonly seen hue.
+    pub const AURORA_LOW: Color = Color::Rgb(30, 65, 48);
+    pub const AURORA_MED: Color = Color::Rgb(45, 120, 78);
+    pub const AURORA_HIGH: Color = Color::Rgb(80, 210, 130);
     pub const COAST: Color = Color::Rgb(80, 110, 120);
     pub const STATION: Color = Color::Rgb(120, 230, 150);
     pub const PAD: Color = Color::Rgb(235, 150, 215);
@@ -96,6 +108,10 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
         .get()
         .and_then(|tr| tr.state_at(now).ok().map(|s| (tr.clone(), s)));
     let pad = selected_launch_pad(app, &data);
+    // `None` unless the `a` key is on *and* the feed has ever returned a
+    // grid — a failed or still-pending fetch just means no oval this frame,
+    // never a panic or a blank grid drawn as though it were real data.
+    let aurora = data.aurora.get().filter(|_| app.aurora_overlay);
 
     if app.map_fullscreen {
         let [title, body, status] = Layout::vertical([
@@ -105,7 +121,7 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
         ])
         .areas(area);
         title_bar(frame, title, app, &data);
-        map::draw(frame, body, app, sat_state.as_ref(), now, pad);
+        map::draw(frame, body, app, sat_state.as_ref(), now, pad, aurora);
         status_bar(frame, status, app, &data);
     } else {
         let [title, main, bottom, status] = Layout::vertical([
@@ -151,12 +167,12 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
             (Some(highlight), Some((tracker, state))) => {
                 skyplot::draw(frame, map_area, app, &highlight, tracker, state);
             }
-            _ => map::draw(frame, map_area, app, sat_state.as_ref(), now, pad),
+            _ => map::draw(frame, map_area, app, sat_state.as_ref(), now, pad, aurora),
         }
         panels::tracked::draw(frame, tracked, app);
         panels::telemetry::draw(frame, telem, app, sat_state.as_ref(), data.tle.get().is_some(), now);
         panels::passes::draw(frame, passes, app, sat_state.as_ref(), now);
-        panels::weather::draw(frame, weather, app, &data);
+        panels::weather::draw(frame, weather, app, &data, now);
         panels::launches::draw(frame, launches, app, &data, wall_now);
         status_bar(frame, status, app, &data);
     }
@@ -475,7 +491,7 @@ fn key_hints(focus: Panel, map_fullscreen: bool) -> Vec<String> {
             ),
             Panel::Telemetry => (&["t/T downlink"], &["t/T downlink"]),
             Panel::Passes | Panel::Launches => (&["j/k scroll"], &["j/k scroll"]),
-            Panel::Weather => (&[], &[]),
+            Panel::Weather => (&["a aurora"], &["a aurora"]),
         }
     };
 

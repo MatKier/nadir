@@ -185,6 +185,12 @@ pub struct App {
     /// Whether the map draws its layer of prominent-place labels (the `p`
     /// key). Renderer state only — like `follow`/`zoom`, it isn't persisted.
     pub places: bool,
+    /// Whether the map draws the aurora oval (the `a` key). On by default —
+    /// unlike `places` it starts enabled, since it draws nothing until the
+    /// aurora feed has ever returned data and so can't clutter a fresh map
+    /// the way an always-on place layer would. Renderer state only, not
+    /// persisted.
+    pub aurora_overlay: bool,
     pub show_help: bool,
     /// Scroll offset within the help overlay, in lines; clamped against its
     /// content height at render time.
@@ -510,6 +516,7 @@ impl App {
             KeyCode::Char('m') => self.map_fullscreen = !self.map_fullscreen,
             KeyCode::Char('f') => self.follow = !self.follow,
             KeyCode::Char('p') => self.places = !self.places,
+            KeyCode::Char('a') => self.aurora_overlay = !self.aurora_overlay,
             // `=`/`_` so the binding fires whether or not shift is held.
             KeyCode::Char('+') | KeyCode::Char('=') => self.zoom_in(),
             KeyCode::Char('-') | KeyCode::Char('_') => self.zoom_out(),
@@ -1044,6 +1051,7 @@ pub async fn run(mut config: Config) -> Result<()> {
         follow: false,
         zoom: 0,
         places: false,
+        aurora_overlay: true,
         show_help: false,
         help_scroll: 0,
         should_quit: false,
@@ -1661,6 +1669,7 @@ mod tests {
             follow: false,
             zoom: 0,
             places: false,
+            aurora_overlay: true,
             show_help: false,
             help_scroll: 0,
             should_quit: false,
@@ -1739,6 +1748,7 @@ mod tests {
             peak_elevation_deg: 0.0,
             aos_azimuth_deg: 0.0,
             los_azimuth_deg: 0.0,
+            peak_azimuth_deg: 0.0,
             visible: false,
         });
         app.switch_satellite(20580, Some("HST".to_string()));
@@ -1884,6 +1894,7 @@ mod tests {
             peak_elevation_deg: 30.0,
             aos_azimuth_deg: 200.0,
             los_azimuth_deg: 20.0,
+            peak_azimuth_deg: 110.0,
             visible,
         }
     }

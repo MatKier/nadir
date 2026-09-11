@@ -98,7 +98,10 @@ pub fn draw(
                 ),
             ]));
 
-            rows.push(kv("APSIS", format!("{:>VALUE_W$.0} × {:.0} km", orb.perigee_km, orb.apogee_km)));
+            rows.push(kv(
+                "APSIS",
+                format!("{:>VALUE_W$.0} × {:.0} km  e {:.3}", orb.perigee_km, orb.apogee_km, orb.eccentricity),
+            ));
 
             rows.push(kv("REV", format!("{:>VALUE_W$}", s.revolution)));
 
