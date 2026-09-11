@@ -190,13 +190,17 @@ fn content(app: &App) -> Vec<Line<'static>> {
 
     heading(&mut l, "Next passes");
     text(&mut l, "Passes peaking above 10° elevation within the next 96h, recomputed");
-    text(&mut l, "every 20s. Each row: day, AOS–LOS in local time, duration in");
-    text(&mut l, "minutes, peak elevation, and the AOS→LOS compass azimuths.");
+    text(&mut l, "every 20s. Each row: date, AOS–LOS in local time, duration in");
+    text(&mut l, "minutes, peak elevation, and the AOS→LOS compass azimuths. The date");
+    text(&mut l, "spells itself out in full on a wide terminal and shortens a rung at");
+    text(&mut l, "a time as the right column narrows, down to a bare weekday.");
     row(&mut l, "★", "visible to the naked eye — satellite sunlit while you're in darkness");
     text(&mut l, "A footer appears when the ACC timing error above exceeds a second,");
     text(&mut l, "bounding how far the AOS/LOS times on screen could slip.");
-    text(&mut l, "The panel title names your ground station and its UTC offset — the");
-    text(&mut l, "same offset the AOS–LOS times above are shown in.");
+    text(&mut l, "The panel title names your ground station and the UTC offset the");
+    text(&mut l, "AOS–LOS times above are shown in — taken from the passes actually");
+    text(&mut l, "listed, so it names both sides (`UTC+02:00→+01:00`) when a");
+    text(&mut l, "daylight-saving change falls inside the list.");
     text(&mut l, "Focus this panel (`4`) and scroll (`j`/`k`) to highlight a pass — the");
     text(&mut l, "map pane then shows a sky plot of it: a polar chart with the zenith");
     text(&mut l, "at the centre, the horizon at the rim, north up, and elevation rings");
@@ -208,8 +212,9 @@ fn content(app: &App) -> Vec<Line<'static>> {
     text(&mut l, "     or step the time and watch it climb the arc from ▲ past ◇ out to ▼.");
     row(&mut l, "bright arc", "the satellite is sunlit along this stretch of the pass");
     row(&mut l, "dim arc", "it is in the Earth's shadow here");
-    text(&mut l, "The plot's footer gives the AOS / culmination / LOS times, their");
-    text(&mut l, "bearings and the pass length; it clears when focus leaves the panel.");
+    text(&mut l, "The plot's footer gives the pass's date and its AOS / culmination /");
+    text(&mut l, "LOS times, their bearings and the pass length; it clears when focus");
+    text(&mut l, "leaves the panel.");
     blank(&mut l);
 
     heading(&mut l, "Space weather");

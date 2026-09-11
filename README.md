@@ -247,7 +247,8 @@ modelled position error and the along-track timing error it implies — see
 a wide terminal and shorten a rung at a time as the right column narrows — `TLE`
 down to `18h since 09-06 23:11Z`, then to a bare `18h old`. The title bar
 likewise shows the satellite's COSPAR international designator next to its NORAD
-id when the terminal is wide enough to fit it.
+id when the terminal is wide enough to fit it. Next Passes rows do the same with
+their leading date — `Thu 2026-09-11` down to `Thu 09-11`, then to a bare `Thu`.
 
 **Map** — the whole world by default; `f` zooms to a window centred on the
 satellite, wrapping across the dateline to keep it dead centre. `+` / `-` step
