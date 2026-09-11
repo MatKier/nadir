@@ -676,8 +676,14 @@ fn sat_input_popup(frame: &mut Frame, area: Rect, picker: &crate::app::SatPicker
         }
     }
 
+    // `trim: false`: the two leading columns on every result row are the
+    // `▶ `/`  ` marker gutter, and a trimming wrapper strips leading
+    // whitespace off *every* line, selected or not (ratatui-widgets'
+    // `WordWrapper`), which is what made the name column jump sideways under
+    // the selection. See the `HighlightSpacing` comment in
+    // `ui/panels/passes.rs` for the same reasoning applied to `List`.
     frame.render_widget(
-        Paragraph::new(lines).block(block).wrap(Wrap { trim: true }),
+        Paragraph::new(lines).block(block).wrap(Wrap { trim: false }),
         popup,
     );
 }
@@ -749,7 +755,10 @@ fn transmitter_popup(
         }
     }
 
-    frame.render_widget(Paragraph::new(lines).block(block).wrap(Wrap { trim: true }), popup);
+    // `trim: false` for the same reason as `sat_input_popup`: the leading
+    // `{sel}{act} ` gutter is load-bearing whitespace, not padding, and a
+    // trimming wrapper strips it off every unselected row.
+    frame.render_widget(Paragraph::new(lines).block(block).wrap(Wrap { trim: false }), popup);
 }
 
 /// The `g` prompt: a small centred box that takes a time or an offset. Shares
@@ -781,7 +790,11 @@ fn time_input_popup(frame: &mut Frame, area: Rect, input: &crate::app::TimeInput
         Line::from(""),
         hint,
     ];
-    frame.render_widget(Paragraph::new(lines).block(block).wrap(Wrap { trim: true }), popup);
+    // `trim: false` to match `sat_input_popup` and `transmitter_popup`: this
+    // popup has no list to jump, but a trimming wrapper would still strip its
+    // hand-indented "  " off the label and hint lines, so all three popups
+    // agree on a two-column indent instead of disagreeing by two columns.
+    frame.render_widget(Paragraph::new(lines).block(block).wrap(Wrap { trim: false }), popup);
 }
 
 /// A rectangle of the given size, centred inside `area`.
