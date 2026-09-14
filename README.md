@@ -269,12 +269,17 @@ a whole-world map shows only a scattered few and more fill in as you zoom.
 nowcast the `AUR` row reads — off by default, drawing nothing until that feed
 has ever returned data, and suppressed whenever the clock isn't live (warped,
 stepped, jumped or paused) since the nowcast is a real-world snapshot that
-doesn't track the displayed instant.
+doesn't track the displayed instant; its tiers shimmer slowly rather than
+sitting flat, reading as drifting curtains. The ground track behind the
+satellite fades with age — brightest where it meets the sub-satellite point,
+dimmest at its −35 minute end — rather than one flat colour.
 While the Passes panel has focus this pane shows a sky plot of the
 highlighted pass instead — `▲`/`▼` its rise and set on the horizon rim, `◇`
 its culmination, the arc bright where the satellite is sunlit and dim where
 it is eclipsed, and `◆` the satellite itself whenever the clock is inside the
-pass, so warping the time walks it along the arc.
+pass, so warping the time walks it along the arc. The star field behind it
+twinkles — the faintest stars most, the brightest almost not at all — and an
+occasional meteor streaks across the disc.
 
 **Space weather** (NOAA SWPC) — `Kp` planetary K-index, 0–9 · `WIND` solar wind
 speed · `Bt`/`Bz` interplanetary field magnitude and its north–south component

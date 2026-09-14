@@ -254,6 +254,20 @@ impl App {
         self.clock.now()
     }
 
+    /// Whether something on screen is moving on its own right now — the
+    /// aurora shimmer, the sky plot's star twinkle — and so the render loop
+    /// should step up from `FRAME_LIVE` to `FRAME_ANIM` (see
+    /// `frame_interval`). Deliberately narrow: each clause names one visual
+    /// that actually animates, rather than a blanket "is anything
+    /// interesting focused", so an idle dashboard stays at 4 fps.
+    fn is_animating(&self) -> bool {
+        let now = self.sim_now();
+        let aurora_shimmering = ui::aurora_visible(self.aurora_overlay, self.clock.state())
+            && self.data.read().ok().is_some_and(|d| d.aurora.get().is_some());
+        let sky_plot_twinkling = ui::selected_pass(self, now).is_some();
+        aurora_shimmering || sky_plot_twinkling
+    }
+
     /// Switch focus to `panel`, resetting list scroll — a scroll position
     /// from a different list would be meaningless here.
     fn set_focus(&mut self, panel: Panel) {
@@ -1091,17 +1105,27 @@ pub async fn run(mut config: Config) -> Result<()> {
 /// moves. `FRAME_WARP` sits near a terminal's key auto-repeat rate on purpose —
 /// holding a key already drove the loop that fast by waking the `select!` on
 /// every repeat, which is exactly why a held key looked smoother than a warp at
-/// the same speed.
+/// the same speed. `FRAME_ANIM` is a third, gentler step for the handful of
+/// idle-screen effects in `ui::anim` (the aurora shimmer, the sky plot
+/// twinkle) — 10 fps is plenty for a slow drift, and `ui::map::night_wash`
+/// resamples solar elevation over every canvas cell each frame, so matching
+/// `FRAME_WARP`'s 25 fps here would spend real CPU an idle dashboard never
+/// shows the benefit of.
 const FRAME_LIVE: Duration = Duration::from_millis(250);
+const FRAME_ANIM: Duration = Duration::from_millis(100);
 const FRAME_WARP: Duration = Duration::from_millis(40);
 
 /// How long to wait for the next frame. Split out of `render_loop` so the
-/// cadence can be asserted without a terminal.
-fn frame_interval(state: ClockState) -> Duration {
+/// cadence can be asserted without a terminal. `animating` is
+/// `App::is_animating` — threaded in as a plain `bool` for the same reason.
+fn frame_interval(state: ClockState, animating: bool) -> Duration {
     match state {
-        // Only a warp animates on its own. `Drifted` moves at real speed and
-        // `Paused` does not move at all, so both are as static as `Live`.
+        // A warp always wins: it's already redrawing faster than FRAME_ANIM
+        // asks for, so there's nothing left for `animating` to speed up.
         ClockState::Warp(_) => FRAME_WARP,
+        _ if animating => FRAME_ANIM,
+        // `Drifted` moves at real speed and `Paused` does not move at all,
+        // so both are as static as `Live` once nothing is animating either.
         _ => FRAME_LIVE,
     }
 }
@@ -1129,7 +1153,7 @@ async fn render_loop(
         // `Interval::set_period`, and a per-iteration sleep cannot build up the
         // catch-up burst `MissedTickBehavior::Skip` used to guard against.
         tokio::select! {
-            _ = tokio::time::sleep(frame_interval(app.clock.state())) => {}
+            _ = tokio::time::sleep(frame_interval(app.clock.state(), app.is_animating())) => {}
             maybe_event = input_rx.recv() => {
                 match maybe_event {
                     Some(Event::Key(key)) => {
@@ -2154,15 +2178,25 @@ mod tests {
     }
 
     #[test]
-    fn frame_interval_only_speeds_up_for_a_warp() {
+    fn frame_interval_only_speeds_up_for_a_warp_or_an_animation() {
         // The dashboard is a 4 fps clock face unless the clock is winding
         // itself forward — only a warp does that. A drift or a pause is as
-        // static on screen as being live.
-        assert_eq!(frame_interval(ClockState::Live), FRAME_LIVE);
-        assert_eq!(frame_interval(ClockState::Drifted), FRAME_LIVE);
-        assert_eq!(frame_interval(ClockState::Paused), FRAME_LIVE);
-        assert_eq!(frame_interval(ClockState::Warp(2)), FRAME_WARP);
-        assert_eq!(frame_interval(ClockState::Warp(-1800)), FRAME_WARP);
+        // static on screen as being live, absent anything else animating.
+        assert_eq!(frame_interval(ClockState::Live, false), FRAME_LIVE);
+        assert_eq!(frame_interval(ClockState::Drifted, false), FRAME_LIVE);
+        assert_eq!(frame_interval(ClockState::Paused, false), FRAME_LIVE);
+        assert_eq!(frame_interval(ClockState::Warp(2), false), FRAME_WARP);
+        assert_eq!(frame_interval(ClockState::Warp(-1800), false), FRAME_WARP);
+    }
+
+    #[test]
+    fn an_idle_animation_steps_up_the_cadence_but_never_past_a_warp() {
+        assert_eq!(frame_interval(ClockState::Live, true), FRAME_ANIM);
+        assert_eq!(frame_interval(ClockState::Drifted, true), FRAME_ANIM);
+        assert_eq!(frame_interval(ClockState::Paused, true), FRAME_ANIM);
+        // A warp is already redrawing faster than FRAME_ANIM, so an
+        // animation flag riding along with it changes nothing.
+        assert_eq!(frame_interval(ClockState::Warp(2), true), FRAME_WARP);
     }
 
     #[test]

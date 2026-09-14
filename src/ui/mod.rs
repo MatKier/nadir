@@ -1,5 +1,6 @@
 //! Rendering. `draw` is the single entry point called once per frame.
 
+mod anim;
 mod canvas;
 mod help;
 mod map;
@@ -244,7 +245,11 @@ fn right_width(total: u16) -> u16 {
 /// `Live` — a warp's continuous drift, but equally a `←`/`[` step, a `g`
 /// jump, `n`/`N`, or a pause, each of which leaves the clock reading an
 /// instant the nowcast was never about.
-fn aurora_visible(overlay: bool, clock: ClockState) -> bool {
+///
+/// `pub(crate)`, not private: `App::is_animating` needs the same rule to
+/// decide whether the aurora shimmer (`ui::anim`) is actually running this
+/// frame, and duplicating it there would risk the two drifting apart.
+pub(crate) fn aurora_visible(overlay: bool, clock: ClockState) -> bool {
     overlay && clock == ClockState::Live
 }
 

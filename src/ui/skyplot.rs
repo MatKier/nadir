@@ -25,6 +25,7 @@ use crate::orbit::{
     moon_look_angles, moon_phase, sample_pass, sky_sample, star_look_angles, sun_look_angles, Pass,
     SatState, SkySample, Tracker,
 };
+use crate::ui::anim::{hash01, lerp, noise};
 use crate::ui::canvas::{Grid, DOTS_X, DOTS_Y};
 use crate::ui::panels::{compass, local_date, local_hm, local_hms, split_footer};
 use crate::ui::stars::STARS;
@@ -96,11 +97,17 @@ pub fn draw(
     let (x_bounds, y_bounds) = disc_bounds(disc_area);
     let grid = Grid { inner: disc_area, x: x_bounds, y: y_bounds };
     let sky = Sky { pass_time: pass.peak, station: &station, sun, moon, moon_glyph };
+    // Wall time since the session started, not `app.sim_now()` — the
+    // twinkle and any meteor are scenery riding along on the real clock, the
+    // same choice `App::uptime` documents for every other idle-screen
+    // effect: `sim_now()` pauses, reverses and jumps, and a twinkle that did
+    // too would read as broken rather than paused.
+    let phase = app.uptime().as_secs_f32();
     let canvas = Canvas::default()
         .marker(Marker::Braille)
         .x_bounds(x_bounds)
         .y_bounds(y_bounds)
-        .paint(|ctx| paint(ctx, &grid, pass, &samples, peak, live, &sky));
+        .paint(|ctx| paint(ctx, &grid, pass, &samples, peak, live, &sky, phase));
     frame.render_widget(canvas, disc_area);
 
     if let Some(fa) = footer_area {
@@ -185,6 +192,7 @@ fn paint(
     peak: Option<SkySample>,
     live: Option<LookAngles>,
     sky: &Sky<'_>,
+    phase: f32,
 ) {
     // Elevation rings — the 0° horizon rim, then 30° and 60°. Reference
     // scenery, so PLACE, the same neutral slate the map's place layer uses.
@@ -202,9 +210,23 @@ fn paint(
     }
     ctx.layer();
 
-    // The star field and the Sun/Moon, drawn before the arc so nothing this
-    // panel is actually about — the pass — ever sits under reference sky.
-    draw_stars(ctx, grid, sky.pass_time, sky.station);
+    // The star field, a passing meteor and the Sun/Moon, drawn before the
+    // arc so nothing this panel is actually about — the pass — ever sits
+    // under reference sky.
+    draw_stars(ctx, grid, sky.pass_time, sky.station, phase);
+    if let Some(m) = meteor_at(phase) {
+        ctx.draw(&CanvasLine {
+            x1: m.from.0,
+            y1: m.from.1,
+            x2: m.to.0,
+            y2: m.to.1,
+            // Bright at spawn, fading to the same dim slate the reference
+            // sky already uses, rather than to black — so it dies into the
+            // scenery instead of vanishing against it.
+            color: lerp(Theme::VALUE, Theme::PLACE, m.age),
+        });
+        ctx.layer();
+    }
     if sky.sun.elevation_deg >= 0.0 {
         let (x, y) = project(sky.sun.azimuth_deg, sky.sun.elevation_deg);
         grid.print_dot(ctx, x, y, Span::styled("☉", Style::new().fg(Theme::CAUTION)));
@@ -295,28 +317,69 @@ fn draw_arc(ctx: &mut Context<'_>, samples: &[SkySample], want: bool, color: Col
     drew
 }
 
+/// How many discrete twinkle brightness levels the star field draws in.
+/// One `Points` call per tier — the same bucketing `map::night_wash` uses
+/// for its aurora tiers, and for the same reason: a braille cell carries one
+/// fg colour, so two stars landing in the same cell at genuinely different
+/// continuous brightnesses would just fuse into whichever drew last. A
+/// handful of discrete tiers, each its own layer-free `Points` draw, is
+/// enough steps for a scintillation to read as motion without paying for a
+/// draw call per star.
+const TWINKLE_TIERS: usize = 4;
+
+/// Which of [`TWINKLE_TIERS`] brightness levels `star_index`'s dot sits at,
+/// at this `phase`. Scintillation amplitude scales with `mag`: Sirius
+/// (magnitude ~-1.5, the brightest star on the table) barely dims, while the
+/// faintest pointer stars (~2.4) swing across the whole range — matching
+/// what actually happens looking up, since a fainter star's light is more
+/// affected by atmospheric turbulence relative to its own brightness.
+/// `star_index` seeds a per-star noise lane so neighbouring stars twinkle
+/// out of step with each other rather than in lockstep.
+fn twinkle_tier(star_index: usize, mag: f64, phase: f32) -> usize {
+    const FAINTEST_MAG: f32 = 2.4;
+    const BRIGHTEST_MAG: f32 = -1.5;
+    let amp = ((mag as f32 - BRIGHTEST_MAG) / (FAINTEST_MAG - BRIGHTEST_MAG)).clamp(0.0, 1.0);
+    let base = 1.0 - amp * 0.7; // even at minimum, a bright star stays high
+    let flicker = noise(star_index as u32, phase * 1.3) * amp;
+    let t = (base + flicker * 0.7).clamp(0.0, 1.0);
+    ((t * (TWINKLE_TIERS - 1) as f32).round() as usize).min(TWINKLE_TIERS - 1)
+}
+
 /// The star field: every [`STARS`] entry above the local horizon at `time`
-/// gets a bare dot in one shared braille layer, so — like the coastline and
-/// the ground track on the map — it sits under whatever draws after it, and
-/// the arc always wins where the two coincide. The brightest
+/// gets a bare dot, twinkling between [`Theme::PLACE`] and [`Theme::VALUE`]
+/// (see [`twinkle_tier`]) in one shared set of braille layers, so — like the
+/// coastline and the ground track on the map — it sits under whatever draws
+/// after it, and the arc always wins where the two coincide. The brightest
 /// [`MAX_STAR_LABELS`] of those visible also get their name, printed as a
 /// label so it stays legible over the arc the way every other mark on this
 /// plot does — labels are drawn after every layer regardless of call order
 /// (see `print_marker`'s note in `ui::map`), so a name here can only ever sit
 /// on top, never under. `STARS` is kept sorted brightest first, so walking it
 /// in order already visits stars in the order worth labelling.
-fn draw_stars(ctx: &mut Context<'_>, grid: &Grid, time: DateTime<Utc>, station: &GeoPoint) {
-    let visible: Vec<(&'static crate::ui::stars::Star, f64, f64)> = STARS
+fn draw_stars(ctx: &mut Context<'_>, grid: &Grid, time: DateTime<Utc>, station: &GeoPoint, phase: f32) {
+    let visible: Vec<(usize, &'static crate::ui::stars::Star, f64, f64)> = STARS
         .iter()
-        .filter_map(|s| {
+        .enumerate()
+        .filter_map(|(i, s)| {
             let la = star_look_angles(s.ra_deg, s.dec_deg, station, time);
-            (la.elevation_deg >= 0.0).then_some((s, la.azimuth_deg, la.elevation_deg))
+            (la.elevation_deg >= 0.0).then_some((i, s, la.azimuth_deg, la.elevation_deg))
         })
         .collect();
 
-    let points: Vec<(f64, f64)> = visible.iter().map(|&(_, az, el)| project(az, el)).collect();
-    if !points.is_empty() {
-        ctx.draw(&Points { coords: &points, color: Theme::PLACE });
+    let mut tiers: [Vec<(f64, f64)>; TWINKLE_TIERS] = std::array::from_fn(|_| Vec::new());
+    for &(i, star, az, el) in &visible {
+        tiers[twinkle_tier(i, star.mag, phase)].push(project(az, el));
+    }
+    let mut any_drawn = false;
+    for (tier, points) in tiers.iter().enumerate() {
+        if points.is_empty() {
+            continue;
+        }
+        let t = tier as f32 / (TWINKLE_TIERS - 1) as f32;
+        ctx.draw(&Points { coords: points, color: lerp(Theme::PLACE, Theme::VALUE, t) });
+        any_drawn = true;
+    }
+    if any_drawn {
         ctx.layer();
     }
 
@@ -326,7 +389,7 @@ fn draw_stars(ctx: &mut Context<'_>, grid: &Grid, time: DateTime<Utc>, station: 
     // label" check is enough — skipped stars keep their bare dot from the
     // layer above, just no name.
     let mut claimed: Vec<(u16, u16)> = Vec::new();
-    for (star, az, el) in &visible {
+    for (_, star, az, el) in &visible {
         if claimed.len() >= MAX_STAR_LABELS {
             break;
         }
@@ -343,6 +406,74 @@ fn draw_stars(ctx: &mut Context<'_>, grid: &Grid, time: DateTime<Utc>, station: 
             Span::styled(format!("· {}", star.name), Style::new().fg(Theme::PLACE)),
         );
     }
+}
+
+/// One shooting star in flight: the endpoints of its streak in disc
+/// coordinates, and `age` in `0..1` from spawn to the end of its life — the
+/// fade [`meteor_at`]'s caller draws it at.
+struct Meteor {
+    from: (f64, f64),
+    to: (f64, f64),
+    age: f32,
+}
+
+/// How often a meteor might appear: time is cut into slots this many seconds
+/// long, and each slot independently rolls whether it spawns one.
+const METEOR_SLOT_SECONDS: f32 = 8.0;
+/// How long a spawned meteor's streak stays on screen, in seconds — well
+/// inside its slot, so there's always a quiet gap before the next one could
+/// appear.
+const METEOR_LIFETIME_SECONDS: f32 = 0.6;
+/// Chance a given slot spawns a meteor at all — roughly one every four slots,
+/// so about one every half-minute on average, often enough to notice, rare
+/// enough to still be a surprise.
+const METEOR_SPAWN_CHANCE: f32 = 0.25;
+/// A noise seed lane reserved for meteor rolls, chosen well clear of
+/// `STARS`'s index range (under 40) so a meteor's spawn roll and a star's
+/// twinkle roll never draw from the same hash lane by coincidence.
+const METEOR_SEED: u32 = 0xFEED;
+
+/// The meteor in flight at `phase`, if any. Time is bucketed into
+/// [`METEOR_SLOT_SECONDS`]-long slots, each independently deciding — from a
+/// hash of its own slot index, so the same slot always decides the same way —
+/// whether it spawns a meteor living for the slot's first
+/// [`METEOR_LIFETIME_SECONDS`]. Entirely a function of `phase`: nothing is
+/// threaded through the render loop to remember "was a meteor already
+/// flying", which is also what makes this trivial to test — the same phase
+/// always answers the same way.
+fn meteor_at(phase: f32) -> Option<Meteor> {
+    if phase < 0.0 {
+        return None;
+    }
+    let slot = (phase / METEOR_SLOT_SECONDS).floor();
+    let slot_index = slot as u32;
+    let t_in_slot = phase - slot * METEOR_SLOT_SECONDS;
+    if t_in_slot >= METEOR_LIFETIME_SECONDS {
+        return None;
+    }
+    // A step function, not `noise`'s smoothed interpolation: whether a slot
+    // spawns a meteor at all must not drift as the phase crosses into it, or
+    // a meteor could fade in from nothing right as its slot begins.
+    if hash01(METEOR_SEED, slot_index) >= METEOR_SPAWN_CHANCE {
+        return None;
+    }
+    let age = t_in_slot / METEOR_LIFETIME_SECONDS;
+
+    // Start point and direction both drawn from the same slot index, so a
+    // meteor's path is fixed for its whole life and different slots streak
+    // across different parts of the disc rather than all repeating one path.
+    use std::f32::consts::{FRAC_PI_2, FRAC_PI_4, TAU};
+    let start_angle = hash01(METEOR_SEED.wrapping_add(1), slot_index) * TAU;
+    let travel_angle =
+        start_angle + FRAC_PI_4 + hash01(METEOR_SEED.wrapping_add(2), slot_index) * FRAC_PI_2;
+    let start_r = 0.15 + hash01(METEOR_SEED.wrapping_add(3), slot_index) * 0.5;
+    const LENGTH: f32 = 0.25;
+    let from = (f64::from(start_r * start_angle.cos()), f64::from(start_r * start_angle.sin()));
+    let to = (
+        f64::from(start_r * start_angle.cos() + LENGTH * travel_angle.cos()),
+        f64::from(start_r * start_angle.sin() + LENGTH * travel_angle.sin()),
+    );
+    Some(Meteor { from, to, age })
 }
 
 /// `SKY · pass 2 of 7`, plus ` · ★` when the pass is naked-eye and the header
@@ -529,7 +660,7 @@ mod tests {
                 .marker(Marker::Braille)
                 .x_bounds(x)
                 .y_bounds(y)
-                .paint(|ctx| paint(ctx, &grid, &pass, &samples, None, live, &sky))
+                .paint(|ctx| paint(ctx, &grid, &pass, &samples, None, live, &sky, 0.0))
                 .render(rect, &mut buf);
             buf
         };
@@ -576,7 +707,7 @@ mod tests {
                 .marker(Marker::Braille)
                 .x_bounds(x)
                 .y_bounds(y)
-                .paint(|ctx| paint(ctx, &grid, &pass, &[], None, live, &sky))
+                .paint(|ctx| paint(ctx, &grid, &pass, &[], None, live, &sky, 0.0))
                 .render(rect, &mut buf);
             buf
         };
@@ -637,7 +768,7 @@ mod tests {
             .marker(Marker::Braille)
             .x_bounds(x)
             .y_bounds(y)
-            .paint(|ctx| paint(ctx, &grid, &pass, &[], None, None, sky))
+            .paint(|ctx| paint(ctx, &grid, &pass, &[], None, None, sky, 0.0))
             .render(rect, &mut buf);
         buf
     }
@@ -703,12 +834,97 @@ mod tests {
             .marker(Marker::Braille)
             .x_bounds(x)
             .y_bounds(y)
-            .paint(|ctx| draw_stars(ctx, &grid, pass.peak, &station))
+            .paint(|ctx| draw_stars(ctx, &grid, pass.peak, &station, 0.0))
             .render(rect, &mut buf);
 
+        // Theme::PLACE, not one of the twinkle tier colours: the visible
+        // star's *name* label is drawn in it unconditionally, regardless of
+        // which brightness tier its dot lands in at this phase — see
+        // `draw_stars`'s labelling loop.
         assert!(
             buf.content.iter().any(|c| c.fg == Theme::PLACE),
             "expected at least one star dot above the horizon"
         );
+    }
+
+    #[test]
+    fn twinkle_tier_always_lands_inside_its_own_range() {
+        for star_index in 0..40u32 {
+            for step in 0..200 {
+                let tier = twinkle_tier(star_index as usize, 1.0, step as f32 * 0.37);
+                assert!(tier < TWINKLE_TIERS, "tier {tier} out of range for star {star_index}");
+            }
+        }
+    }
+
+    #[test]
+    fn twinkle_tier_is_deterministic_for_the_same_star_and_phase() {
+        assert_eq!(twinkle_tier(5, 0.9, 12.3), twinkle_tier(5, 0.9, 12.3));
+    }
+
+    #[test]
+    fn the_brightest_star_on_the_table_twinkles_less_than_the_faintest() {
+        // Sirius (mag -1.46) should stay clustered near the bright tiers
+        // across a long phase sweep; the faintest pointer star on the table
+        // should visit a wider spread of tiers over the same sweep — the
+        // amplitude-scales-with-magnitude rule `twinkle_tier` documents.
+        let sirius_mag = STARS.iter().map(|s| s.mag).fold(f64::INFINITY, f64::min);
+        let faintest_mag = STARS.iter().map(|s| s.mag).fold(f64::NEG_INFINITY, f64::max);
+
+        let spread = |mag: f64| -> usize {
+            let tiers: std::collections::HashSet<usize> =
+                (0..500).map(|i| twinkle_tier(1, mag, i as f32 * 0.31)).collect();
+            tiers.len()
+        };
+        assert!(
+            spread(sirius_mag) <= spread(faintest_mag),
+            "Sirius (mag {sirius_mag}) should not out-twinkle the faintest star (mag {faintest_mag})"
+        );
+    }
+
+    #[test]
+    fn meteor_at_is_deterministic_for_the_same_phase() {
+        // Whatever the answer at a given phase is — spawned or not — it must
+        // be the same answer every time, since nothing else tells the render
+        // loop "a meteor was already flying".
+        for i in 0..500 {
+            let phase = i as f32 * 0.41;
+            let a = meteor_at(phase).map(|m| (m.from, m.to, m.age));
+            let b = meteor_at(phase).map(|m| (m.from, m.to, m.age));
+            assert_eq!(a, b, "meteor_at({phase}) differed between two calls");
+        }
+    }
+
+    #[test]
+    fn meteor_at_neither_never_nor_always_fires_over_a_long_sweep() {
+        let mut slots_with_meteor = 0usize;
+        let total_slots = 300;
+        for slot in 0..total_slots {
+            // Sample the middle of each slot's lifetime window, where a
+            // spawned meteor is definitely still alive.
+            let phase = slot as f32 * METEOR_SLOT_SECONDS + METEOR_LIFETIME_SECONDS * 0.5;
+            if meteor_at(phase).is_some() {
+                slots_with_meteor += 1;
+            }
+        }
+        assert!(slots_with_meteor > 0, "expected at least one meteor over {total_slots} slots");
+        assert!(
+            slots_with_meteor < total_slots,
+            "expected at least one quiet slot over {total_slots} slots"
+        );
+    }
+
+    #[test]
+    fn meteor_at_is_silent_outside_its_slots_lifetime_window() {
+        // Whatever slot 0 decides, the instant right at the end of its
+        // lifetime window and beyond must be quiet — a meteor does not span
+        // an entire slot, only its first `METEOR_LIFETIME_SECONDS`.
+        assert!(meteor_at(METEOR_LIFETIME_SECONDS).is_none());
+        assert!(meteor_at(METEOR_SLOT_SECONDS - 0.01).is_none());
+    }
+
+    #[test]
+    fn meteor_at_never_panics_on_a_negative_phase() {
+        assert!(meteor_at(-5.0).is_none());
     }
 }

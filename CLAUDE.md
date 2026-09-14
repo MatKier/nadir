@@ -86,9 +86,12 @@ table; update both. The bottom-bar hint is focus-scoped in `key_hints`
 there (like Tracked's `Enter`/`d` or Telemetry's `t`/`T`) needs a `match focus`
 arm so the bar advertises it.
 
-`ui::draw` is the sole render entry point, called every 250 ms by `render_loop`.
-It takes the `RwLock` read guard once per frame and drops it before drawing the
-help overlay.
+`ui::draw` is the sole render entry point; `render_loop` calls it every
+`frame_interval` — 250 ms idle, stepping up to 100 ms whenever
+`App::is_animating` says something on screen is moving on its own (the aurora
+shimmer, a sky-plot twinkle), 40 ms during a clock warp. It takes the
+`RwLock` read guard once per frame and drops it before drawing the help
+overlay.
 
 ### Network etiquette is load-bearing
 

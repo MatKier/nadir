@@ -122,7 +122,7 @@ fn content(app: &App) -> Vec<Line<'static>> {
     row(&mut l, "○◔◑◕●", "with `o` on: the sublunar point — the glyph is the Moon's phase");
     row(&mut l, "· / +", "with `p` on: a labelled city / satellite ground station");
     row(&mut l, "bright line", "the next 65 minutes of ground track");
-    row(&mut l, "dim line", "the past 35 minutes of ground track");
+    row(&mut l, "fading line", "the past 35 minutes of ground track — dimmest at −35m, brightening to meet the satellite");
     row(&mut l, "violet ring", "the visibility footprint — where the satellite is above 0°");
     row(&mut l, "amber dots", "the day/night terminator");
     row(&mut l, "dark ground", "the night side of the Earth");
@@ -142,6 +142,9 @@ fn content(app: &App) -> Vec<Line<'static>> {
     text(&mut l, "`a` shades the night side's aurora probability in three brightening");
     text(&mut l, "green tiers, off by default and drawing nothing until the feed has");
     text(&mut l, "ever returned data — the header shows `AUR` while it's actually live.");
+    text(&mut l, "The tiers shimmer slowly rather than sitting flat, so the oval reads");
+    text(&mut l, "as drifting curtains — real motion never changes which cells qualify,");
+    text(&mut l, "only how they're bucketed at the edges between tiers.");
     text(&mut l, "It's also suppressed whenever the clock isn't live: warped, stepped,");
     text(&mut l, "jumped or paused, the nowcast is a real-world snapshot that doesn't");
     text(&mut l, "track the displayed instant.");
@@ -220,7 +223,9 @@ fn content(app: &App) -> Vec<Line<'static>> {
     text(&mut l, "at the centre, the horizon at the rim, north up, and elevation rings");
     text(&mut l, "at 30° and 60°.");
     row(&mut l, "· name", "a star, placed as it will actually be at the pass's culmination");
-    text(&mut l, "     the brightest few dozen, dimmest first so the arc always wins");
+    text(&mut l, "     the brightest few dozen, dimmest first so the arc always wins;");
+    text(&mut l, "     each twinkles, the faintest most, the brightest almost not at all");
+    text(&mut l, "     — and every so often a meteor streaks across the disc");
     row(&mut l, "☉ / phase glyph", "the Sun / Moon, likewise at culmination, above the horizon");
     row(&mut l, "▲ / ▼", "the pass rising (AOS) and setting (LOS), on the horizon rim");
     row(&mut l, "◇", "culmination, labelled with its peak elevation");
@@ -237,7 +242,8 @@ fn content(app: &App) -> Vec<Line<'static>> {
     heading(&mut l, "Space weather");
     text(&mut l, "From NOAA's Space Weather Prediction Center.");
     row(&mut l, "Kp", "planetary K-index 0–9; sparkline is the last ~3 days of samples");
-    text(&mut l, "     green below 4, amber from 4, red from 5 (storm level)");
+    text(&mut l, "     green below 4, amber from 4, red from 5 (storm level) — each bar");
+    text(&mut l, "     coloured by its own reading, so a storm arriving shows on the strip");
     row(&mut l, "WIND", "solar wind bulk proton speed, km/s");
     row(&mut l, "Bt / Bz", "interplanetary field magnitude / its north–south component, nT");
     text(&mut l, "     strongly southward Bz drives aurora; amber at ≤ −5, red at ≤ −10");

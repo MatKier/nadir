@@ -14,6 +14,7 @@ use crate::app::{App, Panel};
 use crate::geo::{footprint_ring, GeoPoint};
 use crate::orbit::solar::{subsolar_point, terminator_polyline, SunGeometry, CIVIL_TWILIGHT_DEG};
 use crate::orbit::{moon_phase, sublunar_point, SatState, Tracker};
+use crate::ui::anim::{lerp, noise};
 use crate::ui::canvas::Grid;
 use crate::ui::panels::truncate;
 use crate::ui::places::{Place, PLACES};
@@ -149,9 +150,13 @@ pub fn draw(
     // real-longitude bounds. Away from the dateline (and whenever follow is
     // off) it returns a single full-width pane and this is exactly the old
     // single-canvas render.
+    // Wall time since the session started — see `App::uptime`'s note on why
+    // an idle-screen effect like the aurora shimmer rides the real clock
+    // rather than `now`, which is `sim_now()` and can pause, reverse or jump.
+    let phase = app.uptime().as_secs_f32();
     for pane in panes(inner, x_bounds) {
         let grid = Grid { inner: pane.rect, x: pane.x, y: y_bounds };
-        let wash = night_wash(&grid, now, aurora);
+        let wash = night_wash(&grid, now, aurora, phase);
         let canvas = Canvas::default()
             .marker(Marker::Braille)
             .x_bounds(pane.x)
@@ -249,7 +254,10 @@ fn paint_scene(ctx: &mut Context<'_>, grid: &Grid, scene: &Scene<'_>, wash: &Was
         ctx.layer();
     }
     if let Some(segments) = &scene.track_past {
-        draw_polyline(ctx, segments, Theme::TRACK_PAST);
+        // A comet tail: dim at −35 min, brightening to meet TRACK_FUTURE's
+        // own colour right at the satellite, so the two halves read as one
+        // continuous line rather than a seam at "now".
+        draw_fading_polyline(ctx, segments, Theme::TRACK_PAST, Theme::TRACK_FUTURE);
         ctx.layer();
     }
     if let Some(segments) = &scene.track_future {
@@ -555,7 +563,45 @@ const AURORA_LOW_PCT: u8 = 10;
 const AURORA_MED_PCT: u8 = 35;
 const AURORA_HIGH_PCT: u8 = 70;
 
-fn night_wash(grid: &Grid, now: DateTime<Utc>, aurora: Option<&AuroraGrid>) -> Wash {
+/// Aurora shimmer amplitude: the sampled probability is scaled by
+/// `1.0 ± AURORA_SHIMMER_AMPLITUDE`, so at the widest swing a 100% cell still
+/// scales to `100 * (1.0 - AURORA_SHIMMER_AMPLITUDE)`, which must stay ≥
+/// `AURORA_HIGH_PCT` — shimmer must never be able to demote a saturated
+/// reading out of the top tier. The pre-existing
+/// `a_saturated_aurora_grid_puts_every_dark_cell_in_the_brightest_tier` pins
+/// this at `phase = 0.0`;
+/// `a_saturated_aurora_grid_stays_in_the_brightest_tier_at_any_phase` extends
+/// it across a phase sweep.
+const AURORA_SHIMMER_AMPLITUDE: f32 = 0.15;
+
+/// The multiplicative shimmer applied to a sampled aurora probability at
+/// `(lat, lon)` and this animation `phase` — see `night_wash`. Coarse spatial
+/// buckets (10° cells) rather than one noise lane per exact coordinate, so
+/// neighbouring cells drift together as a patch instead of sparkling
+/// independently; a longitude-dependent term on top of the phase makes that
+/// patch sweep east across the oval rather than just pulsing in place.
+///
+/// `phase == 0.0` always returns exactly `1.0` — the untouched, un-shimmered
+/// reading — which is what lets every `night_wash` test written before
+/// shimmer existed keep calling it with `0.0` and pin precisely the buckets
+/// it already did; nothing about the noise construction below happens to
+/// land on the identity at its own phase origin, so this is a deliberate
+/// early return, not an incidental property of the formula.
+fn aurora_gain(lat: f64, lon: f64, phase: f32) -> f32 {
+    if phase == 0.0 {
+        return 1.0;
+    }
+    let cell_lat = (lat / 10.0).round() as i32;
+    let cell_lon = (lon / 10.0).round() as i32;
+    // A cheap 2D->1D fold for the noise seed; doesn't need to be a good hash
+    // on its own since `noise`'s internal mix does the actual scrambling.
+    let seed = (cell_lat as u32).wrapping_mul(97).wrapping_add(cell_lon as u32);
+    let drift = phase * 0.15 + lon as f32 * 0.1;
+    let n = noise(seed, drift); // 0..1
+    1.0 + (n - 0.5) * 2.0 * AURORA_SHIMMER_AMPLITUDE
+}
+
+fn night_wash(grid: &Grid, now: DateTime<Utc>, aurora: Option<&AuroraGrid>, phase: f32) -> Wash {
     let sun = SunGeometry::at(now);
     let mut wash = Wash::default();
     for row in 0..grid.rows() {
@@ -585,6 +631,14 @@ fn night_wash(grid: &Grid, now: DateTime<Utc>, aurora: Option<&AuroraGrid>) -> W
                 continue;
             }
             let Some(prob) = aurora.and_then(|g| g.probability_at(lat, lon)) else { continue };
+            // Shimmer: a slow multiplicative gain on the sampled probability,
+            // so cells near a tier boundary drift across it frame to frame —
+            // that drift *is* the "moving curtains" effect, not a separate
+            // draw. Applied before bucketing rather than after, so it can
+            // never invent a tier the real probability didn't already
+            // qualify a cell to be near.
+            let gain = aurora_gain(lat, lon, phase);
+            let prob = ((f64::from(prob) * f64::from(gain)).round() as i32).clamp(0, 100) as u8;
             if prob >= AURORA_HIGH_PCT {
                 wash.aurora_high.push((lon, lat));
             } else if prob >= AURORA_MED_PCT {
@@ -607,6 +661,39 @@ fn draw_polyline(ctx: &mut Context<'_>, segments: &[Vec<GeoPoint>], color: Color
                 y2: w[1].lat_deg,
                 color,
             });
+        }
+    }
+}
+
+/// Like [`draw_polyline`], but fading from `old` at the earliest point to
+/// `new` at the most recent one — a comet tail. Relies on `segments` being in
+/// chronological order both within and across the slice, which
+/// `Tracker::ground_track` guarantees (it walks time forward and
+/// `split_at_antimeridian` only ever cuts a run into pieces, never reorders
+/// it) — this function has no timestamp of its own to check that with, only
+/// the point sequence.
+fn draw_fading_polyline(ctx: &mut Context<'_>, segments: &[Vec<GeoPoint>], old: Color, new: Color) {
+    let total_lines: usize = segments.iter().map(|s| s.len().saturating_sub(1)).sum();
+    if total_lines == 0 {
+        return;
+    }
+    let mut drawn = 0usize;
+    for seg in segments {
+        for w in seg.windows(2) {
+            // `total_lines - 1` guards the single-line case (division by
+            // zero would otherwise land here whenever the whole track is one
+            // segment with exactly two points) by falling back to `old` —
+            // with nothing to interpolate across, the one line keeps the
+            // colour its single point would have.
+            let t = if total_lines > 1 { drawn as f32 / (total_lines - 1) as f32 } else { 0.0 };
+            ctx.draw(&CanvasLine {
+                x1: w[0].lon_deg,
+                y1: w[0].lat_deg,
+                x2: w[1].lon_deg,
+                y2: w[1].lat_deg,
+                color: lerp(old, new, t),
+            });
+            drawn += 1;
         }
     }
 }
@@ -873,7 +960,7 @@ mod tests {
         use chrono::TimeZone;
         let g = Grid { inner: Rect::new(0, 0, 72, 36), x: [-180.0, 180.0], y: [-90.0, 90.0] };
         let t = Utc.with_ymd_and_hms(2026, 9, 4, 6, 0, 0).unwrap();
-        let wash = night_wash(&g, t, None);
+        let wash = night_wash(&g, t, None, 0.0);
         let (night, twilight) = (&wash.night, &wash.twilight);
 
         let total = usize::from(g.cols()) * usize::from(g.rows());
@@ -939,7 +1026,7 @@ mod tests {
         // dropped by ratatui, unshaded, and the bug is back.
         let t = Utc.with_ymd_and_hms(2026, 9, 4, 6, 0, 0).unwrap();
         for g in edge_case_grids() {
-            let wash = night_wash(&g, t, None);
+            let wash = night_wash(&g, t, None, 0.0);
             for (lon, lat) in wash.night.iter().chain(&wash.twilight) {
                 assert!(
                     *lon >= g.x[0] && *lon <= g.x[1] && *lat >= g.y[0] && *lat <= g.y[1],
@@ -964,7 +1051,7 @@ mod tests {
             y: [-41.25, -18.75],
         };
         let t = Utc.with_ymd_and_hms(2026, 9, 4, 6, 0, 0).unwrap();
-        let wash = night_wash(&g, t, None);
+        let wash = night_wash(&g, t, None, 0.0);
 
         let cells = usize::from(g.cols()) * usize::from(g.rows());
         assert_eq!(wash.night.len(), cells, "every cell should be full night");
@@ -983,7 +1070,7 @@ mod tests {
         let t = Utc.with_ymd_and_hms(2026, 9, 4, 12, 0, 0).unwrap();
         let everywhere = AuroraGrid::uniform(100);
 
-        let wash = night_wash(&g, t, Some(&everywhere));
+        let wash = night_wash(&g, t, Some(&everywhere), 0.0);
         let tinted = wash.aurora_low.len() + wash.aurora_med.len() + wash.aurora_high.len();
         let dark = wash.night.len() + wash.twilight.len();
         assert!(tinted > 0, "expected some cells on the night side to tint");
@@ -1001,10 +1088,71 @@ mod tests {
         let t = Utc.with_ymd_and_hms(2026, 9, 4, 12, 0, 0).unwrap();
         let everywhere = AuroraGrid::uniform(100);
 
-        let wash = night_wash(&g, t, Some(&everywhere));
+        let wash = night_wash(&g, t, Some(&everywhere), 0.0);
         let dark = wash.night.len() + wash.twilight.len();
         assert_eq!(wash.aurora_high.len(), dark);
         assert!(wash.aurora_low.is_empty() && wash.aurora_med.is_empty());
+    }
+
+    /// The same guarantee as the test above, but swept across a wide range of
+    /// phases — shimmer must never be able to knock a saturated cell out of
+    /// the brightest tier, whatever the drift lands on.
+    #[test]
+    fn a_saturated_aurora_grid_stays_in_the_brightest_tier_at_any_phase() {
+        use chrono::TimeZone;
+        let g = Grid { inner: Rect::new(0, 0, 60, 30), x: [-180.0, 180.0], y: [-90.0, 90.0] };
+        let t = Utc.with_ymd_and_hms(2026, 9, 4, 12, 0, 0).unwrap();
+        let everywhere = AuroraGrid::uniform(100);
+
+        for step in 0..50 {
+            let phase = step as f32 * 3.7;
+            let wash = night_wash(&g, t, Some(&everywhere), phase);
+            let dark = wash.night.len() + wash.twilight.len();
+            assert_eq!(
+                wash.aurora_high.len(),
+                dark,
+                "phase {phase}: a saturated cell dropped out of the brightest tier"
+            );
+        }
+    }
+
+    /// `aurora_gain(.., 0.0)` is the identity — the exact property every
+    /// `night_wash` test written before shimmer existed relies on when it
+    /// calls the function with `0.0`.
+    #[test]
+    fn aurora_gain_is_the_identity_at_phase_zero() {
+        for (lat, lon) in [(0.0, 0.0), (67.0, -140.0), (-52.0, 179.0), (89.9, 0.0)] {
+            assert_eq!(aurora_gain(lat, lon, 0.0), 1.0);
+        }
+    }
+
+    /// Away from `phase = 0.0`, shimmer should actually move the reading —
+    /// otherwise it isn't shimmering at all, just an expensive way to
+    /// recompute the same wash every frame.
+    #[test]
+    fn aurora_gain_varies_away_from_phase_zero() {
+        let values: Vec<f32> = (1..40).map(|i| aurora_gain(60.0, 20.0, i as f32 * 0.9)).collect();
+        let distinct = values
+            .iter()
+            .enumerate()
+            .filter(|(i, v)| values[..*i].iter().all(|o| (o - *v).abs() > 1e-6))
+            .count();
+        assert!(distinct > 1, "expected the gain to vary across phases, got {values:?}");
+    }
+
+    /// Every gain the wash could ever multiply a probability by stays inside
+    /// `1.0 ± AURORA_SHIMMER_AMPLITUDE` — the bound the saturated-cell
+    /// invariant above depends on.
+    #[test]
+    fn aurora_gain_never_exceeds_its_documented_amplitude() {
+        for i in 0..500 {
+            let phase = i as f32 * 1.3;
+            let g = aurora_gain(-40.0 + (i % 17) as f64, (i % 31) as f64 * 12.0, phase);
+            assert!(
+                (1.0 - AURORA_SHIMMER_AMPLITUDE..=1.0 + AURORA_SHIMMER_AMPLITUDE).contains(&g),
+                "gain {g} at phase {phase} exceeded ±{AURORA_SHIMMER_AMPLITUDE}"
+            );
+        }
     }
 
     /// A grid that never reaches the low threshold should tint nothing — the
@@ -1016,7 +1164,7 @@ mod tests {
         let t = Utc.with_ymd_and_hms(2026, 9, 4, 12, 0, 0).unwrap();
         let quiet = AuroraGrid::uniform(AURORA_LOW_PCT - 1);
 
-        let wash = night_wash(&g, t, Some(&quiet));
+        let wash = night_wash(&g, t, Some(&quiet), 0.0);
         assert!(wash.aurora_low.is_empty() && wash.aurora_med.is_empty() && wash.aurora_high.is_empty());
     }
 
@@ -1539,5 +1687,96 @@ mod tests {
             }
         }
         assert!(crossings > 0, "the ring never shared a cell with the coastline — test is vacuous");
+    }
+
+    /// Renders `draw_fading_polyline` alone into a fresh buffer and returns
+    /// the fg colour of the first and last non-blank cell it painted, in
+    /// left-to-right, top-to-bottom scan order. Good enough to tell "did it
+    /// fade" apart from "did it draw one flat colour" without decoding
+    /// exactly which braille dot a given lon/lat lands on.
+    fn render_fading_track(segments: &[Vec<GeoPoint>], old: Color, new: Color) -> Vec<Color> {
+        use ratatui::widgets::Widget;
+        let x = [-180.0_f64, 180.0];
+        let y = [-90.0_f64, 90.0];
+        let rect = Rect::new(0, 0, 180, 45);
+        let mut buf = ratatui::buffer::Buffer::empty(rect);
+        Canvas::default()
+            .marker(Marker::Braille)
+            .x_bounds(x)
+            .y_bounds(y)
+            .paint(|ctx| draw_fading_polyline(ctx, segments, old, new))
+            .render(rect, &mut buf);
+        buf.content.iter().filter(|c| c.symbol() != " ").map(|c| c.fg).collect()
+    }
+
+    #[test]
+    fn a_fading_track_is_nearer_old_at_its_start_than_at_its_end() {
+        // A straight run from -60° to +60° longitude along the equator —
+        // long enough to land in several distinct cells so the fade actually
+        // has room to show.
+        let segment: Vec<GeoPoint> =
+            (-60..=60).step_by(5).map(|lon| GeoPoint::new(0.0, lon as f64, 0.0)).collect();
+        let old = Color::Rgb(0, 0, 0);
+        let new = Color::Rgb(255, 255, 255);
+        let colors = render_fading_track(&[segment], old, new);
+        assert!(colors.len() >= 2, "expected the track to paint more than one cell");
+
+        let brightness = |c: Color| match c {
+            Color::Rgb(r, g, b) => r as u32 + g as u32 + b as u32,
+            _ => 0,
+        };
+        assert!(
+            brightness(*colors.first().unwrap()) < brightness(*colors.last().unwrap()),
+            "expected the track to brighten from old to new: {:?} -> {:?}",
+            colors.first(),
+            colors.last()
+        );
+    }
+
+    #[test]
+    fn a_fading_track_reaches_flat_old_and_new_at_its_own_ends() {
+        // Antipodal endpoints so the very first and very last drawn segment
+        // land in cells nowhere near each other — no risk of a later draw
+        // overwriting an earlier one at the same cell and hiding the
+        // endpoint colours this test checks.
+        let segment =
+            vec![GeoPoint::new(-80.0, -170.0, 0.0), GeoPoint::new(-80.0, -160.0, 0.0)];
+        let old = Color::Rgb(10, 20, 30);
+        let new = Color::Rgb(200, 210, 220);
+        let colors = render_fading_track(&[segment], old, new);
+        assert!(colors.contains(&old), "expected the start of a single line to be exactly `old`");
+        // The lone line's *far* endpoint still carries interpolated colour —
+        // only a multi-line track's last draw reaches `new` exactly (see the
+        // multi-segment test below); a single line's `t` is fixed at its
+        // start and its `CanvasLine` end shares that one colour.
+        assert!(colors.iter().all(|c| *c == old), "a single line has one t and thus one colour");
+    }
+
+    #[test]
+    fn a_fading_track_with_many_segments_reaches_new_at_its_final_line() {
+        let segment: Vec<GeoPoint> =
+            (0..=10).map(|i| GeoPoint::new(10.0, i as f64 * 3.0, 0.0)).collect();
+        let old = Color::Rgb(10, 20, 30);
+        let new = Color::Rgb(200, 210, 220);
+        let colors = render_fading_track(&[segment], old, new);
+        assert_eq!(
+            *colors.last().unwrap(),
+            new,
+            "the final drawn line of a multi-line track should land exactly on `new`"
+        );
+    }
+
+    #[test]
+    fn a_fading_track_with_no_segments_does_not_panic() {
+        render_fading_track(&[], Color::Rgb(0, 0, 0), Color::Rgb(255, 255, 255));
+    }
+
+    #[test]
+    fn a_fading_track_with_a_single_point_segment_does_not_panic() {
+        // `windows(2)` on a one-point segment yields nothing to draw — this
+        // pins that `total_lines` correctly comes out to 0 rather than
+        // underflowing `len() - 1` on an unsigned length of 1.
+        let segment = vec![GeoPoint::new(0.0, 0.0, 0.0)];
+        render_fading_track(&[segment], Color::Rgb(0, 0, 0), Color::Rgb(255, 255, 255));
     }
 }
