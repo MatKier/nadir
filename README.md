@@ -199,6 +199,7 @@ and will not work here.
 | `p` | toggle labelled cities and ground stations on the map |
 | `a` | toggle the aurora oval on the map |
 | `o` | toggle the Sun/Moon markers on the map |
+| `b` | toggle an orthographic globe view in place of the flat map |
 | `s` | search Celestrak's catalogue for another object, by name or NORAD id |
 | `r` | refresh the focused panel's feed(s) now |
 | `t` | step to the next configured downlink frequency (drives the `DOPP` row) |
@@ -307,6 +308,11 @@ it is eclipsed, and `◆` the satellite itself whenever the clock is inside the
 pass, so warping the time walks it along the arc. The star field behind it
 twinkles — the faintest stars most, the brightest almost not at all — and an
 occasional meteor streaks across the disc.
+`b` swaps the map for an orthographic globe instead — Earth as a disc
+centred on the sub-satellite point, the ground track curving over the limb,
+the night side a real shadowed crescent. A narrower picture on purpose: no
+follow zoom, places, pad marker, aurora oval or Sun/Moon, since the
+satellite sits dead centre by construction rather than by pressing `f`.
 
 **Next Passes** — a pass rising within `aos_lead` (30s by default, see
 [Presentation timings](#presentation-timings)) swaps its ordinary AOS–LOS time

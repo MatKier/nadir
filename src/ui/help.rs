@@ -76,6 +76,10 @@ fn content(app: &App) -> Vec<Line<'static>> {
     row(&mut l, "p", "toggle labelled cities and ground stations on the map");
     row(&mut l, "a", "toggle the aurora oval on the map");
     row(&mut l, "o", "toggle the Sun/Moon markers on the map");
+    row(&mut l, "b", "toggle an orthographic globe view in place of the flat map");
+    text(&mut l, "     a simpler picture — coastline, ground track, footprint, night");
+    text(&mut l, "     shading, station and satellite only, always centred on the");
+    text(&mut l, "     satellite; the other map keys above don't apply to it");
     row(&mut l, "s", "search Celestrak's catalogue for a satellite, by name or NORAD id");
     row(&mut l, "Enter", "on Tracked: start tracking the highlighted satellite");
     row(&mut l, "d / Del", "on Tracked: drop the highlighted satellite from the list");
@@ -157,6 +161,12 @@ fn content(app: &App) -> Vec<Line<'static>> {
     text(&mut l, "track the displayed instant.");
     text(&mut l, "While NEXT PASSES holds focus this pane shows a sky plot of the");
     text(&mut l, "highlighted pass instead — see below.");
+    text(&mut l, "`b` swaps this whole pane for an orthographic globe: Earth as a disc");
+    text(&mut l, "centred on the sub-satellite point, the ground track curving over the");
+    text(&mut l, "limb, the night side a real shadowed crescent. A narrower picture on");
+    text(&mut l, "purpose — no follow zoom, places, pad marker, aurora oval or Sun/Moon");
+    text(&mut l, "— since the satellite sits dead centre by construction, not by");
+    text(&mut l, "pressing f.");
     blank(&mut l);
 
     heading(&mut l, "Tracked");

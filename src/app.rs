@@ -197,6 +197,14 @@ pub struct App {
     /// immediately on a fresh map, so it opts in rather than opting out.
     /// Renderer state only, not persisted.
     pub sun_moon: bool,
+    /// Whether the map pane shows `ui::globe`'s orthographic view instead of
+    /// the flat equirectangular one (the `b` key). Off by default; yields to
+    /// the sky plot exactly as the flat map does whenever a pass is
+    /// highlighted in Passes, since that swap already needs the pane more
+    /// than either map view does. Renderer state only, not persisted — like
+    /// `follow`/`zoom`, which stay meaningless while this is on, since the
+    /// globe has no window to zoom or follow.
+    pub globe: bool,
     /// Whether `ui::draw`'s boot splash should stop showing — `true` from
     /// the start when launched with `--no-splash`, and set the moment
     /// `handle_key` sees the first keypress while it's still up (see its own
@@ -639,6 +647,7 @@ impl App {
             KeyCode::Char('p') => self.places = !self.places,
             KeyCode::Char('a') => self.aurora_overlay = !self.aurora_overlay,
             KeyCode::Char('o') => self.sun_moon = !self.sun_moon,
+            KeyCode::Char('b') => self.globe = !self.globe,
             // `=`/`_` so the binding fires whether or not shift is held.
             KeyCode::Char('+') | KeyCode::Char('=') => self.zoom_in(),
             KeyCode::Char('-') | KeyCode::Char('_') => self.zoom_out(),
@@ -1182,6 +1191,7 @@ pub async fn run(mut config: Config, skip_splash: bool) -> Result<()> {
         places: false,
         aurora_overlay: false,
         sun_moon: false,
+        globe: false,
         splash_skipped: skip_splash,
         show_help: false,
         help_scroll: 0,
@@ -1814,6 +1824,7 @@ mod tests {
             places: false,
             aurora_overlay: false,
             sun_moon: false,
+            globe: false,
             // Tests build an `App` to exercise its logic, not to watch a
             // timing-dependent splash — always already past it.
             splash_skipped: true,

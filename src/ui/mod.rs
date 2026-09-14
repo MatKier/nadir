@@ -2,6 +2,8 @@
 
 mod anim;
 mod canvas;
+mod coastline;
+mod globe;
 mod help;
 mod map;
 mod panels;
@@ -136,7 +138,15 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
         ])
         .areas(area);
         title_bar(frame, title, app, &data);
-        map::draw(frame, body, app, sat_state.as_ref(), now, pad, aurora);
+        // Fullscreen mode never swaps in the sky plot, even with a pass
+        // highlighted in Passes — `m` is "always the map, just bigger", not a
+        // second way to reach the plot. `b`'s globe toggle isn't that kind of
+        // override, so it still applies here.
+        if app.globe {
+            globe::draw(frame, body, app, sat_state.as_ref(), now);
+        } else {
+            map::draw(frame, body, app, sat_state.as_ref(), now, pad, aurora);
+        }
         status_bar(frame, status, app, &data);
     } else {
         let [title, main, bottom, status] = Layout::vertical([
@@ -182,6 +192,11 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
             (Some(highlight), Some((tracker, state))) => {
                 skyplot::draw(frame, map_area, app, &highlight, tracker, state);
             }
+            // The globe toggle (`b`) is the map pane's other alternate view —
+            // yields to the sky plot above (a pass actually highlighted is
+            // the more specific, more urgent thing to show) but otherwise
+            // takes the pane over from the ordinary flat map.
+            _ if app.globe => globe::draw(frame, map_area, app, sat_state.as_ref(), now),
             _ => map::draw(frame, map_area, app, sat_state.as_ref(), now, pad, aurora),
         }
         panels::tracked::draw(frame, tracked, app);
@@ -637,7 +652,7 @@ fn key_hints(focus: Panel, map_fullscreen: bool) -> Vec<String> {
     // flag is what lets Tracked shed it at the narrow tier while keeping its
     // own two keys.
     let map_keys: (&[&str], &[&str]) = (
-        &["m map", "f follow", "p places", "o sun/moon", "+/- zoom"],
+        &["m map", "f follow", "p places", "o sun/moon", "b globe", "+/- zoom"],
         &["m map", "f follow", "o sun/moon", "+/- zoom"],
     );
     let (wide, narrow): (&[&str], &[&str]) = if map_fullscreen {

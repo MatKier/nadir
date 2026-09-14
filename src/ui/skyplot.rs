@@ -158,7 +158,11 @@ fn live_look(pass: &Pass, station: &GeoPoint, state: &SatState) -> Option<LookAn
 /// of the map's fixed 2:1 lon:lat half-span (see `map::view_bounds`). Both
 /// spans come out ≥ 2, so the radius-1 disc always fits with room to spare on
 /// the wider axis.
-fn disc_bounds(area: Rect) -> ([f64; 2], [f64; 2]) {
+///
+/// `pub(super)` rather than private: `ui::globe`'s disc is the same
+/// radius-1-circle-in-a-braille-`Rect` shape this plot's own disc is, so it
+/// shares this rather than recomputing the same aspect correction.
+pub(super) fn disc_bounds(area: Rect) -> ([f64; 2], [f64; 2]) {
     let w = area.width.max(1) as f64 * f64::from(DOTS_X);
     let h = area.height.max(1) as f64 * f64::from(DOTS_Y);
     if w >= h {
