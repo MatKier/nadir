@@ -89,9 +89,9 @@ arm so the bar advertises it.
 `ui::draw` is the sole render entry point; `render_loop` calls it every
 `frame_interval` — 250 ms idle, stepping up to 100 ms whenever
 `App::is_animating` says something on screen is moving on its own (the aurora
-shimmer, a sky-plot twinkle, the AOS border pulse), 40 ms during a clock warp.
-It takes the `RwLock` read guard once per frame and drops it before drawing
-the help overlay.
+shimmer, a sky-plot twinkle, the AOS border pulse, the boot splash's reveal),
+40 ms during a clock warp. It takes the `RwLock` read guard once per frame and
+drops it before drawing the help overlay.
 
 ### Network etiquette is load-bearing
 
@@ -105,11 +105,12 @@ per feed (1h / 1m / 5m / 10m) so no config file can turn nadir into a bad
 upstream client. Don't shorten the defaults, or weaken a floor, to make a change
 easier to observe.
 
-Presentation timings — currently just the AOS lead-in window — live in a
-separate, non-network `config::Ui` table with its own `clamped()`: unlike
-`Intervals`, this has a real ceiling as well as a floor, so it clamps a range
-rather than only raising a too-eager value. Same `[section]`-with-defaults
-shape as `Intervals`, wired into `App::run`'s startup sequence the same way.
+Presentation timings — the AOS lead-in window and the boot splash duration —
+live in a separate, non-network `config::Ui` table with its own `clamped()`:
+unlike `Intervals`, these have a real ceiling as well as a floor, so it clamps
+a range rather than only raising a too-eager value. Same `[section]`-with-
+defaults shape as `Intervals`, wired into `App::run`'s startup sequence the
+same way.
 
 ## Conventions
 

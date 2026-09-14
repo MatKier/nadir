@@ -199,15 +199,22 @@ pub struct Ui {
     /// starts, rather than the numbers happening to agree by coincidence.
     #[serde(default = "default_aos_lead", with = "interval_str")]
     pub aos_lead: Duration,
+    /// How long the mission-control boot splash stays up before the dashboard
+    /// takes over on its own — any keypress or `--no-splash` skips it sooner.
+    #[serde(default = "default_splash", with = "interval_str")]
+    pub splash: Duration,
 }
 
 fn default_aos_lead() -> Duration {
     Duration::from_secs(30)
 }
+fn default_splash() -> Duration {
+    Duration::from_secs(3)
+}
 
 impl Default for Ui {
     fn default() -> Self {
-        Self { aos_lead: default_aos_lead() }
+        Self { aos_lead: default_aos_lead(), splash: default_splash() }
     }
 }
 
@@ -218,6 +225,11 @@ impl Ui {
     /// would put several rows into countdown mode at once.
     const AOS_LEAD_MIN: Duration = Duration::from_secs(5);
     const AOS_LEAD_MAX: Duration = Duration::from_secs(10 * 60);
+    /// The allowed range for `splash`. The floor keeps it from flashing past
+    /// unread; the ceiling keeps a typo from parking the dashboard on the
+    /// splash screen.
+    const SPLASH_MIN: Duration = Duration::from_secs(1);
+    const SPLASH_MAX: Duration = Duration::from_secs(30);
 
     /// The effective values — each clamped into its allowed range — plus a
     /// human-readable line for every value that was moved, to be surfaced in
@@ -244,8 +256,10 @@ impl Ui {
                 value
             }
         };
-        let clamped =
-            Self { aos_lead: clamp(self.aos_lead, Self::AOS_LEAD_MIN, Self::AOS_LEAD_MAX, "AOS lead") };
+        let clamped = Self {
+            aos_lead: clamp(self.aos_lead, Self::AOS_LEAD_MIN, Self::AOS_LEAD_MAX, "AOS lead"),
+            splash: clamp(self.splash, Self::SPLASH_MIN, Self::SPLASH_MAX, "splash duration"),
+        };
         (clamped, notes)
     }
 }
@@ -317,9 +331,10 @@ pub struct Config {
     /// shipped default.
     #[serde(default)]
     pub intervals: Intervals,
-    /// Presentation timings — currently just the AOS lead-in window. Missing
-    /// entirely, or missing individual keys, on an older config file — each
-    /// field falls back to its shipped default, same as `intervals`.
+    /// Presentation timings — the AOS lead-in window and the boot splash
+    /// duration. Missing entirely, or missing individual keys, on an older
+    /// config file — each field falls back to its shipped default, same as
+    /// `intervals`.
     #[serde(default)]
     pub ui: Ui,
 
@@ -895,7 +910,7 @@ mod tests {
     #[test]
     fn a_ui_table_round_trips_through_toml() {
         let mut c = Config::default();
-        c.ui = Ui { aos_lead: Duration::from_secs(45) };
+        c.ui = Ui { aos_lead: Duration::from_secs(45), splash: Duration::from_secs(5) };
         let text = toml::to_string_pretty(&c).unwrap();
         let back: Config = toml::from_str(&text).unwrap();
         assert_eq!(back.ui, c.ui);
@@ -908,21 +923,30 @@ mod tests {
     }
 
     #[test]
+    fn a_partial_ui_table_fills_the_rest_from_defaults() {
+        let c: Config = toml::from_str("[ui]\nsplash = \"5s\"\n").unwrap();
+        assert_eq!(c.ui.splash, Duration::from_secs(5));
+        assert_eq!(c.ui.aos_lead, Ui::default().aos_lead);
+    }
+
+    #[test]
     fn ui_clamped_raises_a_too_short_value_to_its_floor_and_reports_it() {
-        let eager = Ui { aos_lead: Duration::from_secs(1) };
+        let eager = Ui { aos_lead: Duration::from_secs(1), splash: Duration::from_millis(500) };
         let (out, notes) = eager.clamped();
         assert_eq!(out.aos_lead, Ui::AOS_LEAD_MIN);
-        assert_eq!(notes.len(), 1, "one line for the value raised");
+        assert_eq!(out.splash, Ui::SPLASH_MIN);
+        assert_eq!(notes.len(), 2, "one line per value raised");
         assert!(notes.iter().any(|n| n.contains("AOS lead") && n.contains("raised")));
     }
 
     #[test]
     fn ui_clamped_lowers_a_too_long_value_to_its_ceiling_and_reports_it() {
-        let lazy = Ui { aos_lead: Duration::from_secs(3600) };
+        let lazy = Ui { aos_lead: Duration::from_secs(3600), splash: Duration::from_secs(120) };
         let (out, notes) = lazy.clamped();
         assert_eq!(out.aos_lead, Ui::AOS_LEAD_MAX);
-        assert_eq!(notes.len(), 1, "one line for the value lowered");
-        assert!(notes.iter().any(|n| n.contains("AOS lead") && n.contains("lowered")));
+        assert_eq!(out.splash, Ui::SPLASH_MAX);
+        assert_eq!(notes.len(), 2, "one line per value lowered");
+        assert!(notes.iter().any(|n| n.contains("splash duration") && n.contains("lowered")));
     }
 
     #[test]

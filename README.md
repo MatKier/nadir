@@ -95,7 +95,17 @@ terminal or larger.
 --config <path>       use a specific config file
 --offline             make no network requests; use cached data only
 --no-geoip            never guess location from IP, even with none configured
+--no-splash           skip the boot splash and go straight to the dashboard
 ```
+
+A mission-control splash — nadir's wordmark and version, then ground station,
+tracked element set, epoch, propagator, coordinate pipeline and which feeds
+this run will poll, filling in over the first third of the display — shows for
+up to 3 s on launch before the dashboard takes over; any key skips it early,
+and `--no-splash` skips it every time. The box itself is sized for the full
+splash from the very first frame, so filling the rows in doesn't resize or
+re-centre it — only their content appears over time. The duration is
+configurable — see [Presentation timings](#presentation-timings).
 
 `--location` is resolved once at startup via Open-Meteo's geocoding API and the
 result saved like a geolocated or hand-typed one. An ambiguous name takes the
@@ -127,18 +137,20 @@ set to, so a feed refetching on its configured schedule always reads green.
 
 ### Presentation timings
 
-One more timing — nothing to do with the network — is set under `[ui]` in
+Two more timings — nothing to do with the network — are set under `[ui]` in
 `config.toml`, in the same duration-string vocabulary as `[intervals]`:
 
 ```toml
 [ui]
 aos_lead = "30s"  # how far ahead of AOS a pass counts as imminent
+splash = "3s"     # how long the boot splash stays up
 ```
 
-It's also what `n`/`N` (jump to the next pass) land the clock on, so the two
-always agree — pressing `n` always arrives exactly where the "AOS in…"
-countdown starts. Clamped to 5s–10m; a value outside that range is raised or
-lowered and noted in the activity log, the same policy `[intervals]` uses.
+`aos_lead` is also what `n`/`N` (jump to the next pass) land the clock on, so
+the two always agree — pressing `n` always arrives exactly where the "AOS in…"
+countdown starts. It's clamped to 5s–10m; `splash` to 1s–30s. A value outside
+its range is raised or lowered and noted in the activity log, the same policy
+`[intervals]` uses.
 
 ### Tracking other objects
 

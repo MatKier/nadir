@@ -20,8 +20,9 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Clear, Paragraph, Wrap};
 use ratatui::Frame;
 
-use crate::app::{App, Panel, SearchState, TransmitterState};
-use crate::orbit::Pass;
+use crate::app::{App, AppData, Panel, SearchState, TransmitterState};
+use crate::geo::GeoPoint;
+use crate::orbit::{Pass, Tracker};
 use crate::simclock::ClockState;
 use crate::source::Health;
 
@@ -105,6 +106,18 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
         Ok(d) => d,
         Err(_) => return,
     };
+
+    // The mission-control boot splash — after the min-size guard above (it
+    // has no use showing a splash a terminal can't even fit), before
+    // everything else, so a session that's about to skip it pays for none of
+    // the panel layout below. `App::handle_key` swallows the keypress that
+    // dismisses it before this ever sees a chance to run again — see its own
+    // note on why the check lives there and not here.
+    if app.splash_active() {
+        draw_boot_splash(frame, area, app, &data);
+        return;
+    }
+
     let sat_state = data
         .tle
         .get()
@@ -200,6 +213,137 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
     if app.show_help {
         help::draw(frame, area, app);
     }
+}
+
+/// A small block-letter "nadir" mark for the boot splash's opening lines —
+/// a static presentational table under `ui/`, the `stars.rs` / `places.rs`
+/// idiom. Purely decorative, unlike [`boot_lines`] below: it carries no data,
+/// so it needs no honesty rule of its own.
+const NADIR_WORDMARK: [&str; 3] = [
+    "     █▄ █  ▄▀▄  █▀▄  █  █▀▄",
+    "     █ ▀█  █▀█  █ █  █  █▀▄",
+    "     ▀  ▀  ▀ ▀  ▀▀   ▀  ▀ ▀",
+];
+
+/// The release codename shown next to the version on the boot splash. Bump
+/// it alongside the version in `Cargo.toml` on a release, the same way a
+/// changelog heading would.
+const RELEASE_NAME: &str = "First Light";
+
+/// How wide the splash's dotted leader column is, `label` padded up to it —
+/// wide enough for "ground station" (14 chars, the longest of
+/// [`boot_lines`]'s labels) with a handful of dots still visible after it.
+const BOOT_LEADER_WIDTH: usize = 20;
+
+/// The splash's content, in reveal order, as plain `(label, value)` text —
+/// no styling, no layout, so `boot_lines` is testable without a `Frame`.
+/// Mirrors exactly what the dashboard itself is about to show a moment
+/// later (`app.config.ground_station()`, `data.tle.get()`), so the splash
+/// never promises something the real panels don't back up: a field not yet
+/// resolved (the TLE may still be loading from cache or network at boot)
+/// reads `…` rather than a fabricated value or a fake progress bar. `sat` is
+/// `config.sat` — known from the moment the process starts, so it's shown
+/// unconditionally rather than waiting on `tle`; `offline` is `config.offline`,
+/// which likewise nadir already knows at boot without fetching anything.
+fn boot_lines(
+    station: Option<GeoPoint>,
+    tle: Option<&Tracker>,
+    sat: u64,
+    offline: bool,
+) -> Vec<(&'static str, String)> {
+    let station_line = station
+        .map(|s| {
+            let lat_h = if s.lat_deg >= 0.0 { 'N' } else { 'S' };
+            let lon_h = if s.lon_deg >= 0.0 { 'E' } else { 'W' };
+            format!("{:.3}{lat_h} {:.3}{lon_h}", s.lat_deg.abs(), s.lon_deg.abs())
+        })
+        .unwrap_or_else(|| "not configured".to_string());
+    let sat_name = tle.map(Tracker::name).unwrap_or("…");
+    let epoch_line =
+        tle.map(|t| t.epoch().format("%Y-%m-%d %H:%MZ").to_string()).unwrap_or_else(|| "…".to_string());
+    let feeds_line = if offline {
+        "offline — cache only".to_string()
+    } else {
+        "celestrak · swpc · launch library".to_string()
+    };
+    vec![
+        ("ground station", station_line),
+        ("element set", format!("{sat_name} · {sat}")),
+        ("epoch", epoch_line),
+        ("propagator", "SGP4/SDP4  local, no network".to_string()),
+        ("frames", "TEME → ECEF → WGS84".to_string()),
+        ("feeds", feeds_line),
+    ]
+}
+
+/// How many of `total` rows (`boot_lines`' length) should be visible after
+/// `uptime` of a `splash`-long boot screen. Rows reveal across the *first
+/// third* only, reaching `total` at `splash / 3` and holding there for the
+/// remaining two-thirds — the quiet "any key to continue" beat, with nothing
+/// left to animate. At least one row shows from the very first frame, so a
+/// splash that gets skipped almost immediately still showed something rather
+/// than a blank flash.
+fn splash_reveal_count(uptime: std::time::Duration, splash: std::time::Duration, total: usize) -> usize {
+    if total == 0 {
+        return 0;
+    }
+    let third_secs = (splash.as_secs_f32() / 3.0).max(f32::EPSILON);
+    let frac = (uptime.as_secs_f32() / third_secs).clamp(0.0, 1.0);
+    ((frac * total as f32).ceil() as usize).clamp(1, total)
+}
+
+/// The boot splash's text: the wordmark and version line, always shown, then
+/// one line per `lines` entry — a real row (label, dotted leader, value) for
+/// the first `revealed` of them, a blank placeholder for the rest — and the
+/// closing footer. Every call for a given `lines` returns the same number of
+/// lines regardless of `revealed`: only whether a given row's *content* has
+/// filled in yet changes, never how many lines there are or how long any
+/// revealed row's text is. That's what keeps the splash's box a fixed size
+/// as rows reveal (see `draw_boot_splash`) — nothing after the reveal, most
+/// visibly the "any key to continue" footer, shifts as it fills in.
+fn boot_text(lines: &[(&'static str, String)], revealed: usize) -> Vec<Line<'static>> {
+    let mut text: Vec<Line> = NADIR_WORDMARK
+        .iter()
+        .map(|row| Line::from(Span::styled(*row, Style::new().fg(Theme::SAT).bold())))
+        .collect();
+    text.push(Line::from(Span::styled(
+        format!("           v{} · \"{RELEASE_NAME}\"", env!("CARGO_PKG_VERSION")),
+        Style::new().fg(Theme::LABEL),
+    )));
+    text.push(Line::from(""));
+    for (i, (label, value)) in lines.iter().enumerate() {
+        if i < revealed {
+            let dots = ".".repeat(BOOT_LEADER_WIDTH.saturating_sub(label.chars().count()));
+            text.push(Line::from(vec![
+                Span::styled(format!("  {label} "), Style::new().fg(Theme::LABEL)),
+                Span::styled(dots, Style::new().fg(Theme::FRAME)),
+                Span::styled(format!(" {value}"), Style::new().fg(Theme::VALUE)),
+            ]));
+        } else {
+            text.push(Line::from(""));
+        }
+    }
+    text.push(Line::from(""));
+    text.push(Line::from(Span::styled("  any key to continue", Style::new().fg(Theme::LABEL))));
+    text
+}
+
+/// Render the boot splash: `boot_text`'s rows, with `splash_reveal_count`
+/// rows of `boot_lines` filled in and the rest still blank placeholders. The
+/// box is sized from the *fully revealed* text (`boot_text(&lines,
+/// lines.len())`), not from what's actually drawn this frame — so it's
+/// always its final size, even on the very first frame, and never resizes or
+/// re-centres as rows fill in over the first third of `config.ui.splash`.
+fn draw_boot_splash(frame: &mut Frame, area: Rect, app: &App, data: &AppData) {
+    let lines = boot_lines(app.config.ground_station(), data.tle.get(), app.config.sat, app.config.offline);
+    let revealed = splash_reveal_count(app.uptime(), app.config.ui.splash, lines.len());
+
+    let full = boot_text(&lines, lines.len());
+    let height = full.len() as u16;
+    let width = full.iter().map(Line::width).max().unwrap_or(0) as u16;
+
+    let text = boot_text(&lines, revealed);
+    frame.render_widget(Paragraph::new(text), centered(area, width, height));
 }
 
 /// Split the right column's `total` rows between TRACKED and TELEMETRY,
@@ -859,6 +1003,139 @@ mod tests {
     /// chips eat the left ~41 of the status bar — so this is roughly the worst
     /// case the hint has to survive.
     const NARROWEST_HINT_AREA: u16 = 80 - 41;
+
+    #[test]
+    fn boot_lines_reads_pending_data_honestly_rather_than_faking_it() {
+        let lines = boot_lines(None, None, 25544, false);
+        let value = |label: &str| lines.iter().find(|(k, _)| *k == label).map(|(_, v)| v.as_str());
+        assert_eq!(value("ground station"), Some("not configured"));
+        // The NORAD id is known from `config.sat` alone, so it's shown even
+        // with no element set fetched yet — only the *name* half is pending.
+        assert_eq!(value("element set"), Some("… · 25544"));
+        assert_eq!(value("epoch"), Some("…"));
+    }
+
+    #[test]
+    fn boot_lines_names_the_ground_station_with_hemisphere_letters() {
+        let station = GeoPoint::new(48.137, 11.575, 0.0);
+        let lines = boot_lines(Some(station), None, 25544, false);
+        let (_, value) = lines.iter().find(|(k, _)| *k == "ground station").unwrap();
+        assert_eq!(value, "48.137N 11.575E");
+    }
+
+    #[test]
+    fn boot_lines_names_the_southern_and_western_hemispheres_too() {
+        let station = GeoPoint::new(-33.865, -70.9, 0.0);
+        let lines = boot_lines(Some(station), None, 25544, false);
+        let (_, value) = lines.iter().find(|(k, _)| *k == "ground station").unwrap();
+        assert_eq!(value, "33.865S 70.900W");
+    }
+
+    /// The bug the visual check caught: `BOOT_LEADER_WIDTH` was sized against
+    /// the wrong label ("element set", not the actually-longest "ground
+    /// station"), leaving only a single dot in the leader. Pins every real
+    /// label to a handful of dots of headroom so a future label change can't
+    /// quietly repeat that.
+    #[test]
+    fn the_boot_splash_leader_width_fits_every_real_label_with_dots_to_spare() {
+        for (label, _) in boot_lines(None, None, 25544, false) {
+            let spare = BOOT_LEADER_WIDTH.saturating_sub(label.chars().count());
+            assert!(spare >= 4, "label {label:?} leaves only {spare} dots in the leader");
+        }
+    }
+
+    #[test]
+    fn boot_lines_names_the_tracker_once_the_element_set_has_arrived() {
+        let tr = crate::orbit::test_tracker();
+        let lines = boot_lines(None, Some(&tr), 25544, false);
+        let value = |label: &str| lines.iter().find(|(k, _)| *k == label).map(|(_, v)| v.as_str());
+        assert_eq!(value("element set"), Some(format!("{} · 25544", tr.name()).as_str()));
+        assert_ne!(value("epoch"), Some("…"));
+    }
+
+    #[test]
+    fn boot_lines_names_the_coordinate_pipeline_and_the_feeds_it_will_poll() {
+        let lines = boot_lines(None, None, 25544, false);
+        let value = |label: &str| lines.iter().find(|(k, _)| *k == label).map(|(_, v)| v.as_str());
+        assert_eq!(value("frames"), Some("TEME → ECEF → WGS84"));
+        assert_eq!(value("feeds"), Some("celestrak · swpc · launch library"));
+    }
+
+    /// `--offline` (`config.offline`) is known at boot without fetching
+    /// anything, so the splash says up front that nothing will be fetched
+    /// rather than listing feeds that will never be polled this session.
+    #[test]
+    fn boot_lines_names_the_feeds_row_offline_when_the_config_is_offline() {
+        let lines = boot_lines(None, None, 25544, true);
+        let value = |label: &str| lines.iter().find(|(k, _)| *k == label).map(|(_, v)| v.as_str());
+        assert_eq!(value("feeds"), Some("offline — cache only"));
+    }
+
+    /// The row count `draw_boot_splash` builds — wordmark, version, a blank,
+    /// every `boot_lines` row, then a blank and the footer — must still fit
+    /// comfortably under the 80×24 minimum terminal size even with the two
+    /// rows this round added to `boot_lines`.
+    #[test]
+    fn the_boot_splash_height_fits_the_minimum_terminal_size() {
+        let rows = NADIR_WORDMARK.len() + 2 + boot_lines(None, None, 25544, false).len() + 2;
+        assert!(rows <= 24, "boot splash is {rows} rows tall, taller than the 24-row minimum");
+    }
+
+    #[test]
+    fn splash_reveal_count_starts_at_one_and_reaches_every_row_by_a_third_of_the_splash_duration() {
+        let splash = std::time::Duration::from_secs(6);
+        assert_eq!(splash_reveal_count(std::time::Duration::ZERO, splash, 6), 1);
+        assert_eq!(splash_reveal_count(splash / 3, splash, 6), 6);
+    }
+
+    /// The reveal must not creep past the one-third point — the remaining
+    /// two-thirds are meant to be a static hold, not more of the animation.
+    #[test]
+    fn splash_reveal_count_holds_at_every_row_through_the_remaining_two_thirds() {
+        let splash = std::time::Duration::from_secs(6);
+        assert_eq!(splash_reveal_count(splash / 3 + std::time::Duration::from_millis(1), splash, 6), 6);
+        assert_eq!(splash_reveal_count(splash, splash, 6), 6);
+        // Even a key press that lands right on the boundary, or a frame that
+        // ticks a little past `splash` before `splash_active` catches up,
+        // must not panic or overshoot `total`.
+        assert_eq!(splash_reveal_count(splash * 2, splash, 6), 6);
+    }
+
+    #[test]
+    fn splash_reveal_count_climbs_partway_through_the_first_third() {
+        let splash = std::time::Duration::from_secs(6);
+        let count = splash_reveal_count(std::time::Duration::from_secs(1), splash, 6);
+        assert!((1..6).contains(&count), "expected a partial reveal, got {count}/6");
+    }
+
+    #[test]
+    fn splash_reveal_count_is_zero_for_an_empty_line_list() {
+        assert_eq!(splash_reveal_count(std::time::Duration::ZERO, std::time::Duration::from_secs(4), 0), 0);
+    }
+
+    /// The whole point: `boot_text` must return the same number of lines
+    /// whether a row has revealed yet or not, so the box `draw_boot_splash`
+    /// sizes from it never resizes as rows fill in — only line *content*
+    /// changes, never line *count*.
+    #[test]
+    fn boot_text_has_the_same_line_count_at_every_reveal_step() {
+        let lines = boot_lines(None, None, 25544, false);
+        let full_len = boot_text(&lines, lines.len()).len();
+        for revealed in 0..=lines.len() {
+            assert_eq!(boot_text(&lines, revealed).len(), full_len, "revealed={revealed}");
+        }
+    }
+
+    /// An unrevealed row is a blank placeholder, not its label text — so a
+    /// row's content only appears once `revealed` reaches it.
+    #[test]
+    fn boot_text_shows_only_the_revealed_rows_content() {
+        let lines = boot_lines(None, None, 25544, false);
+        let text = boot_text(&lines, 1);
+        let rendered: String = text.iter().flat_map(|l| l.spans.iter()).map(|s| s.content.as_ref()).collect();
+        assert!(rendered.contains("ground station"), "the first row should show: {rendered}");
+        assert!(!rendered.contains("element set"), "the second row should still be blank: {rendered}");
+    }
 
     #[test]
     fn the_aurora_oval_is_drawn_only_when_the_clock_reads_real_time() {

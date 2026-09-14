@@ -197,6 +197,12 @@ pub struct App {
     /// immediately on a fresh map, so it opts in rather than opting out.
     /// Renderer state only, not persisted.
     pub sun_moon: bool,
+    /// Whether `ui::draw`'s boot splash should stop showing — `true` from
+    /// the start when launched with `--no-splash`, and set the moment
+    /// `handle_key` sees the first keypress while it's still up (see its own
+    /// note there). Once true it stays true for the rest of the session;
+    /// there's no key that brings the splash back.
+    pub splash_skipped: bool,
     pub show_help: bool,
     /// Scroll offset within the help overlay, in lines; clamped against its
     /// content height at render time.
@@ -271,17 +277,32 @@ impl App {
             .unwrap_or_else(|_| chrono::Duration::seconds(30))
     }
 
+    /// Whether the boot splash is still on screen: not yet dismissed by a
+    /// keypress, and still within `config.ui.splash` of session start. The one
+    /// check both `App::handle_key` (which key dismisses it) and `ui::draw`
+    /// (whether to draw it at all) need, kept in one place so the two can't
+    /// drift apart.
+    pub fn splash_active(&self) -> bool {
+        !self.splash_skipped && self.uptime() < self.config.ui.splash
+    }
+
     /// Whether something on screen is moving on its own right now — the
-    /// aurora shimmer, the sky plot's star twinkle, the AOS border pulse —
-    /// and so the render loop should step up from `FRAME_LIVE` to
-    /// `FRAME_ANIM` (see `frame_interval`). Deliberately narrow: each clause
-    /// names one visual that actually animates, rather than a blanket "is
-    /// anything interesting focused", so an idle dashboard stays at 4 fps.
+    /// aurora shimmer, the sky plot's star twinkle, the boot splash's rows
+    /// filling in — and so the render loop should step up from `FRAME_LIVE`
+    /// to `FRAME_ANIM` (see `frame_interval`). Deliberately narrow: each
+    /// clause names one visual that actually animates, rather than a
+    /// blanket "is anything interesting focused", so an idle dashboard
+    /// stays at 4 fps.
     fn is_animating(&self) -> bool {
         let now = self.sim_now();
         let aurora_shimmering = ui::aurora_visible(self.aurora_overlay, self.clock.state())
             && self.data.read().ok().is_some_and(|d| d.aurora.get().is_some());
         let sky_plot_twinkling = ui::selected_pass(self, now).is_some();
+        // The splash's reveal only runs across the first third of
+        // `config.ui.splash` (`ui::splash_reveal_count`) — the remaining
+        // two-thirds are a static hold with nothing left to animate, so this
+        // doesn't just reuse `splash_active()`.
+        let splash_revealing = self.splash_active() && self.uptime() < self.config.ui.splash / 3;
         // Matches `ui::panels::passes`'s own gate on the AOS border pulse: a
         // warp or a pause leaves the clock as static on screen as it always
         // was, and the pulse's phase means nothing against a clock that
@@ -292,7 +313,7 @@ impl App {
         let aos_pulsing = self.clock.state() == ClockState::Live
             && (crate::orbit::pass_in_progress(passes, now).is_some()
                 || crate::orbit::pass_imminent(passes, now, self.aos_lead()).is_some());
-        aurora_shimmering || sky_plot_twinkling || aos_pulsing
+        aurora_shimmering || sky_plot_twinkling || aos_pulsing || splash_revealing
     }
 
     /// Switch focus to `panel`, resetting list scroll — a scroll position
@@ -484,6 +505,17 @@ impl App {
         // rest of the keys below.
         if key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL) {
             self.should_quit = true;
+            return;
+        }
+
+        // The boot splash swallows the first key that reaches it — any key,
+        // not a specific one, since dismissing it is the only thing there is
+        // to do with it. `ui::draw` checks `splash_active()` itself, so this
+        // only has to handle the *other* way the splash ends: a key means
+        // "skip", not "wait it out". Once skipped it stays skipped even if
+        // this frame is still within `config.ui.splash`.
+        if self.splash_active() {
+            self.splash_skipped = true;
             return;
         }
 
@@ -1003,8 +1035,11 @@ impl App {
     }
 }
 
-/// Entry point from `main`. Owns the terminal for the duration of the session.
-pub async fn run(mut config: Config) -> Result<()> {
+/// Entry point from `main`. Owns the terminal for the duration of the
+/// session. `skip_splash` is `--no-splash` — kept as its own parameter
+/// rather than a `Config` field since it's a per-launch display preference,
+/// not a setting worth persisting to `config.toml` the way `offline` is.
+pub async fn run(mut config: Config, skip_splash: bool) -> Result<()> {
     let cache = Cache::open().context("opening the disk cache")?;
     config.load_downlinks(&cache);
     let http = api::client()?;
@@ -1147,6 +1182,7 @@ pub async fn run(mut config: Config) -> Result<()> {
         places: false,
         aurora_overlay: false,
         sun_moon: false,
+        splash_skipped: skip_splash,
         show_help: false,
         help_scroll: 0,
         should_quit: false,
@@ -1778,6 +1814,9 @@ mod tests {
             places: false,
             aurora_overlay: false,
             sun_moon: false,
+            // Tests build an `App` to exercise its logic, not to watch a
+            // timing-dependent splash — always already past it.
+            splash_skipped: true,
             show_help: false,
             help_scroll: 0,
             should_quit: false,
@@ -1805,6 +1844,74 @@ mod tests {
         config.ui.aos_lead = std::time::Duration::from_secs(90);
         let app = test_app(config);
         assert_eq!(app.aos_lead(), chrono::Duration::seconds(90));
+    }
+
+    /// While the boot splash is still up (`splash_skipped` false and
+    /// `started` fresh, so `splash_active()` holds), any key must only
+    /// dismiss it — never also perform its ordinary action. `q` stands in for
+    /// "any key": if this one didn't quit, no ordinary key handling ran at
+    /// all.
+    #[test]
+    fn a_key_during_the_boot_splash_only_dismisses_it() {
+        let mut app = test_app(Config::default());
+        app.splash_skipped = false;
+        app.started = Instant::now();
+        app.handle_key(KeyEvent::new(KeyCode::Char('q'), KeyModifiers::NONE));
+        assert!(app.splash_skipped, "the key should have dismissed the splash");
+        assert!(!app.should_quit, "but must not also have acted on 'q'");
+    }
+
+    /// Once the splash has already been dismissed — including by simply
+    /// outliving `config.ui.splash`, which `test_app`'s default
+    /// `splash_skipped: true` stands in for here — keys behave exactly as if
+    /// there had never been a splash at all.
+    #[test]
+    fn a_key_after_the_boot_splash_acts_normally() {
+        let mut app = test_app(Config::default());
+        assert!(app.splash_skipped, "fixture assumption: test_app starts past the splash");
+        app.handle_key(KeyEvent::new(KeyCode::Char('q'), KeyModifiers::NONE));
+        assert!(app.should_quit);
+    }
+
+    #[test]
+    fn splash_active_reflects_the_configured_duration_not_the_shipped_default() {
+        let mut config = Config::default();
+        config.ui.splash = std::time::Duration::from_secs(1);
+        let mut app = test_app(config);
+        app.splash_skipped = false;
+        app.started = Instant::now() - std::time::Duration::from_millis(1500);
+        assert!(
+            !app.splash_active(),
+            "1.5s of uptime must be past a 1s configured splash duration"
+        );
+    }
+
+    #[test]
+    fn splash_active_is_false_once_a_key_has_dismissed_it_even_within_the_duration() {
+        let mut app = test_app(Config::default());
+        app.splash_skipped = false;
+        app.started = Instant::now();
+        app.handle_key(KeyEvent::new(KeyCode::Char('q'), KeyModifiers::NONE));
+        assert!(!app.splash_active(), "the dismissing key must win over remaining time");
+    }
+
+    /// The splash's reveal (`ui::splash_reveal_count`) only spans the first
+    /// third of `config.ui.splash` — the remaining two-thirds are a static
+    /// hold with nothing left to animate — so `is_animating` must track that
+    /// one-third point, not `splash_active`'s full-duration one.
+    #[test]
+    fn is_animating_is_true_only_during_the_first_third_of_the_splash() {
+        let mut app = test_app(Config::default());
+        app.splash_skipped = false;
+        app.started = Instant::now();
+        assert!(app.is_animating(), "the splash should animate its reveal right away");
+
+        app.started = Instant::now() - app.config.ui.splash / 3;
+        assert!(
+            !app.is_animating(),
+            "the remaining two-thirds of the splash are a static hold, not an animation"
+        );
+        assert!(app.splash_active(), "fixture assumption: still within the splash duration");
     }
 
     #[test]

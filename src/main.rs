@@ -47,6 +47,11 @@ struct Cli {
     /// Never attempt IP geolocation, even when no location is configured.
     #[arg(long)]
     no_geoip: bool,
+
+    /// Skip the mission-control boot splash and go straight to the
+    /// dashboard.
+    #[arg(long)]
+    no_splash: bool,
 }
 
 fn main() -> Result<()> {
@@ -62,5 +67,5 @@ fn main() -> Result<()> {
         .build()
         .context("starting the async runtime")?;
 
-    runtime.block_on(nadir::app::run(config))
+    runtime.block_on(nadir::app::run(config, cli.no_splash))
 }
