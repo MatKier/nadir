@@ -267,8 +267,9 @@ by default. `p` toggles a layer of labelled reference points — `·` cities and
 a whole-world map shows only a scattered few and more fill in as you zoom.
 `a` toggles a green aurora oval on the night side, from the same OVATION
 nowcast the `AUR` row reads — off by default, drawing nothing until that feed
-has ever returned data, and suppressed while the clock is warping since the
-nowcast is a real-world snapshot that doesn't track the displayed instant.
+has ever returned data, and suppressed whenever the clock isn't live (warped,
+stepped, jumped or paused) since the nowcast is a real-world snapshot that
+doesn't track the displayed instant.
 While the Passes panel has focus this pane shows a sky plot of the
 highlighted pass instead — `▲`/`▼` its rise and set on the horizon rim, `◇`
 its culmination, the arc bright where the satellite is sunlit and dim where

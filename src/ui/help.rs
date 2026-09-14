@@ -142,8 +142,9 @@ fn content(app: &App) -> Vec<Line<'static>> {
     text(&mut l, "`a` shades the night side's aurora probability in three brightening");
     text(&mut l, "green tiers, off by default and drawing nothing until the feed has");
     text(&mut l, "ever returned data — the header shows `AUR` while it's actually live.");
-    text(&mut l, "It's also suppressed while the clock is warping: the nowcast is a");
-    text(&mut l, "real-world snapshot and doesn't track the displayed instant.");
+    text(&mut l, "It's also suppressed whenever the clock isn't live: warped, stepped,");
+    text(&mut l, "jumped or paused, the nowcast is a real-world snapshot that doesn't");
+    text(&mut l, "track the displayed instant.");
     text(&mut l, "While NEXT PASSES holds focus this pane shows a sky plot of the");
     text(&mut l, "highlighted pass instead — see below.");
     blank(&mut l);

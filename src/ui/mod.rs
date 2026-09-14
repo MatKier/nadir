@@ -21,6 +21,7 @@ use ratatui::Frame;
 
 use crate::app::{App, Panel, SearchState, TransmitterState};
 use crate::orbit::Pass;
+use crate::simclock::ClockState;
 use crate::source::Health;
 
 /// Palette — a calm mission-control console: cyan structure, green nominal,
@@ -81,8 +82,6 @@ impl Theme {
 /// Draw a whole frame. Takes `app` mutably only so the help overlay can
 /// clamp its own scroll offset against the content it just laid out.
 pub fn draw(frame: &mut Frame, app: &mut App) {
-    use crate::simclock::ClockState;
-
     let area = frame.area();
 
     if area.width < 80 || area.height < 24 {
@@ -112,12 +111,8 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
     let pad = selected_launch_pad(app, &data);
     // `None` unless the `a` key is on *and* the feed has ever returned a
     // grid — a failed or still-pending fetch just means no oval this frame,
-    // never a panic or a blank grid drawn as though it were real data. Also
-    // suppressed while the clock is warping: the OVATION nowcast is a
-    // real-world snapshot on its own schedule, not a function of `now`, so
-    // it stops meaning anything once the displayed instant isn't real time.
-    let warping = matches!(app.clock.state(), ClockState::Warp(_));
-    let aurora = data.aurora.get().filter(|_| app.aurora_overlay && !warping);
+    // never a panic or a blank grid drawn as though it were real data.
+    let aurora = data.aurora.get().filter(|_| aurora_visible(app.aurora_overlay, app.clock.state()));
 
     if app.map_fullscreen {
         let [title, body, status] = Layout::vertical([
@@ -242,13 +237,23 @@ fn right_width(total: u16) -> u16 {
     total.saturating_sub(MAP_FLOOR).clamp(40, 54)
 }
 
+/// Whether the map paints the aurora oval this frame. The `a` toggle is only
+/// half of it: the OVATION nowcast is a real-world snapshot on its own
+/// schedule, not a function of `now`, so it stops describing the map the
+/// moment the displayed instant isn't real time. That is every state but
+/// `Live` — a warp's continuous drift, but equally a `←`/`[` step, a `g`
+/// jump, `n`/`N`, or a pause, each of which leaves the clock reading an
+/// instant the nowcast was never about.
+fn aurora_visible(overlay: bool, clock: ClockState) -> bool {
+    overlay && clock == ClockState::Live
+}
+
 /// The title-bar transport marker for the simulated clock, and whether the
 /// clock is locked to wall time (which colours it and the clock green rather
 /// than amber). Single-width geometric glyphs only, from the same family as the
 /// map's `◆ ◇ ◉ ★` — an emoji would render two columns wide and the title bar
 /// measures everything with `chars().count()`.
 fn clock_marker(clock: &crate::simclock::SimClock) -> (String, bool) {
-    use crate::simclock::ClockState;
     match clock.state() {
         ClockState::Live => ("▸ ".to_string(), true),
         ClockState::Drifted => ("▸ ".to_string(), false),
@@ -839,6 +844,19 @@ mod tests {
     /// chips eat the left ~41 of the status bar — so this is roughly the worst
     /// case the hint has to survive.
     const NARROWEST_HINT_AREA: u16 = 80 - 41;
+
+    #[test]
+    fn the_aurora_oval_is_drawn_only_when_the_clock_reads_real_time() {
+        assert!(aurora_visible(true, ClockState::Live));
+        // Every way of leaving real time hides it, not just a warp: a step or
+        // a `g` jump leaves the clock Drifted and a pause freezes it, and the
+        // nowcast describes none of those instants.
+        for off in [ClockState::Drifted, ClockState::Paused, ClockState::Warp(2), ClockState::Warp(-1800)] {
+            assert!(!aurora_visible(true, off), "{off:?}");
+        }
+        // …and the `a` toggle still wins on its own.
+        assert!(!aurora_visible(false, ClockState::Live));
+    }
 
     #[test]
     fn clock_offset_shows_the_two_most_significant_units_signed() {

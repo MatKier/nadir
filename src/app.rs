@@ -186,11 +186,11 @@ pub struct App {
     /// key). Renderer state only — like `follow`/`zoom`, it isn't persisted.
     pub places: bool,
     /// Whether the map draws the aurora oval (the `a` key). Off by default,
-    /// like every other overlay — and force-hidden while the clock is
-    /// warping regardless of this flag, since the OVATION nowcast it draws
-    /// is a live snapshot on its own real-world schedule and doesn't track
-    /// the warped instant (see the read site in `ui::draw`). Renderer state
-    /// only, not persisted.
+    /// like every other overlay — and force-hidden whenever the clock isn't
+    /// reading real time, regardless of this flag: a warp, a step, a jump or
+    /// a pause alike, since the OVATION nowcast it draws is a live snapshot
+    /// on its own real-world schedule and doesn't track any of those instants
+    /// (see `ui::aurora_visible`). Renderer state only, not persisted.
     pub aurora_overlay: bool,
     /// Whether the map draws the Sun/Moon markers (the `o` key). Off by
     /// default, like `places` — unlike the aurora wash it draws something
