@@ -35,11 +35,16 @@ pub fn draw(frame: &mut Frame, area: Rect, app: &App, data: &AppData, now: DateT
     let kp_vals: Vec<f64> = wx.kp.iter().rev().take(24).rev().map(|p| p.kp).collect();
     let latest_kp = wx.latest_kp().unwrap_or(0.0);
     let kp_color = kp_severity_color(latest_kp);
-    rows.push(Line::from(vec![
+    let mut kp_spans = vec![
         label("Kp"),
         Span::styled(format!("{latest_kp:>4.1}  "), Style::new().fg(kp_color).add_modifier(Modifier::BOLD)),
-        Span::styled(sparkline(&kp_vals, 9.0), Style::new().fg(kp_color)),
-    ]));
+    ];
+    // Each bar in its own value's severity colour rather than one flat wash
+    // from the latest reading, so a storm building over the last day and a
+    // half reads directly off the strip — green climbing to amber to red
+    // left to right — instead of only in the single number beside it.
+    kp_spans.extend(sparkline(&kp_vals, 9.0));
+    rows.push(Line::from(kp_spans));
 
     let wind = wx
         .wind_speed_kms
@@ -148,16 +153,17 @@ fn scale_span(letter: &str, level: u8) -> Span<'static> {
     Span::styled(format!("{letter}{level}"), Style::new().fg(color).add_modifier(Modifier::BOLD))
 }
 
-fn sparkline(values: &[f64], max: f64) -> String {
+/// One bar per value, each its own span coloured by `kp_severity_color` of
+/// that value — not a single string in one flat colour — so the strip can
+/// show a storm arriving rather than only how it currently stands.
+fn sparkline(values: &[f64], max: f64) -> Vec<Span<'static>> {
     const BARS: [char; 8] = ['▁', '▂', '▃', '▄', '▅', '▆', '▇', '█'];
-    if values.is_empty() {
-        return String::new();
-    }
     values
         .iter()
         .map(|&v| {
             let frac = (v / max).clamp(0.0, 1.0);
-            BARS[((frac * (BARS.len() - 1) as f64).round() as usize).min(BARS.len() - 1)]
+            let bar = BARS[((frac * (BARS.len() - 1) as f64).round() as usize).min(BARS.len() - 1)];
+            Span::styled(bar.to_string(), Style::new().fg(kp_severity_color(v)))
         })
         .collect()
 }
@@ -209,6 +215,29 @@ mod tests {
         let phase = MoonPhase { illuminated: 0.02, waxing: false, age_days: 28.9 };
         let text: String = moon_row(phase, None).spans.iter().map(|s| s.content.as_ref()).collect();
         assert!(text.contains(phase.name()));
+    }
+
+    #[test]
+    fn the_kp_sparkline_colours_each_bar_by_its_own_value_not_the_latest_one() {
+        // A quiet reading (Kp 1) followed by a storm reading (Kp 7): if the
+        // whole strip were still painted from one value, both bars would
+        // share a colour. Each should instead read its own severity.
+        let bars = sparkline(&[1.0, 7.0], 9.0);
+        assert_eq!(bars.len(), 2);
+        assert_eq!(bars[0].style.fg, Some(kp_severity_color(1.0)));
+        assert_eq!(bars[1].style.fg, Some(kp_severity_color(7.0)));
+        assert_ne!(bars[0].style.fg, bars[1].style.fg);
+    }
+
+    #[test]
+    fn the_kp_sparkline_is_empty_for_no_history_and_never_panics() {
+        assert!(sparkline(&[], 9.0).is_empty());
+    }
+
+    #[test]
+    fn the_kp_sparkline_clamps_a_value_above_max_to_the_tallest_bar() {
+        let bars = sparkline(&[999.0], 9.0);
+        assert_eq!(bars[0].content, "█");
     }
 
     #[test]
