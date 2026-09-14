@@ -97,7 +97,14 @@ fn content(app: &App) -> Vec<Line<'static>> {
     text(&mut l, "     and past 1× straight into reverse (< / > do the same)");
     row(&mut l, "← / →", "step the clock back / forward one minute (h / l too)");
     row(&mut l, "[ / ]", "step the clock back / forward one hour");
-    row(&mut l, "n", "jump to 30 s before the next pass rises, paused there");
+    // Derived rather than hardcoded, so this always names the lead actually
+    // in effect (`[ui]` in config.toml) — the same "print what is actually
+    // in effect" idiom the feed-chip ladders below use.
+    row(
+        &mut l,
+        "n",
+        &format!("jump to {} before the next pass rises, paused there", fmt_interval(app.config.ui.aos_lead)),
+    );
     row(&mut l, "N", "same, but only naked-eye (★) passes");
     row(&mut l, "g", "go to a time — an instant (2026-09-08 04:30), a clock time");
     text(&mut l, "     (04:30, next occurrence) or an offset (+90m, -2h, +3d)");
@@ -212,6 +219,19 @@ fn content(app: &App) -> Vec<Line<'static>> {
     text(&mut l, "out in full on a wide terminal and shortens a rung at a time as the");
     text(&mut l, "right column narrows, down to a bare weekday.");
     row(&mut l, "★", "visible to the naked eye — satellite sunlit while you're in darkness");
+    text(&mut l, &format!(
+        "A pass rising within {} of now (`aos_lead` under `[ui]`, also",
+        fmt_interval(app.config.ui.aos_lead),
+    ));
+    text(&mut l, "where `n`/`N` land the clock) replaces its ordinary AOS–LOS time range");
+    text(&mut l, "with a live `AOS in …` countdown — still with duration, peak elevation");
+    text(&mut l, "and bearing alongside it. Once actually overhead, the countdown");
+    text(&mut l, "switches to culmination — `peak in …`, the best-signal moment — and");
+    text(&mut l, "then to `LOS in …` once that's passed. Either way the panel's own");
+    text(&mut l, "border breathes between its ordinary colour and green (amber for");
+    text(&mut l, "`★`) while the clock reads real time — paused or warped, the border");
+    text(&mut l, "still tints but stops pulsing, the same real-time-only rule the");
+    text(&mut l, "aurora oval follows.");
     text(&mut l, "A footer appears when the ACC timing error above exceeds a second,");
     text(&mut l, "bounding how far the AOS/LOS times on screen could slip.");
     text(&mut l, "The panel title names your ground station and the UTC offset the");

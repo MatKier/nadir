@@ -11,7 +11,9 @@ pub use accuracy::{Accuracy, Confidence};
 pub use celestial::{
     moon_look_angles, moon_phase, star_look_angles, sublunar_point, sun_look_angles, MoonPhase,
 };
-pub use passes::{predict_passes, sample_pass, sky_sample, Pass, SkySample};
+pub use passes::{
+    pass_imminent, pass_in_progress, predict_passes, sample_pass, sky_sample, Pass, SkySample,
+};
 pub use propagate::{OrbitClass, OrbitPlane, OrbitShape, SatState, Tracker};
 
 /// A real ISS element set fetched from Celestrak, shared by every test in this

@@ -125,6 +125,21 @@ activity log; the file is left as you wrote it. A value that doesn't parse
 The status chips and the `?` overlay judge freshness against whatever these are
 set to, so a feed refetching on its configured schedule always reads green.
 
+### Presentation timings
+
+One more timing — nothing to do with the network — is set under `[ui]` in
+`config.toml`, in the same duration-string vocabulary as `[intervals]`:
+
+```toml
+[ui]
+aos_lead = "30s"  # how far ahead of AOS a pass counts as imminent
+```
+
+It's also what `n`/`N` (jump to the next pass) land the clock on, so the two
+always agree — pressing `n` always arrives exactly where the "AOS in…"
+countdown starts. Clamped to 5s–10m; a value outside that range is raised or
+lowered and noted in the activity log, the same policy `[intervals]` uses.
+
 ### Tracking other objects
 
 nadir tracks the ISS by default. Any object in Celestrak's catalogue can be
@@ -179,7 +194,7 @@ and will not work here.
 | `Space` | pause / resume the simulated clock |
 | `,` / `.` | step the clock speed down / up (1× … 1800×), past 1× into reverse (`<` / `>` too) |
 | `←` / `→` | step the clock ±1 minute (`h` / `l` too); `[` / `]` step ±1 hour |
-| `n` / `N` | jump to 30 s before the next pass / next naked-eye pass, paused there |
+| `n` / `N` | jump to `aos_lead` before the next pass / next naked-eye pass, paused there |
 | `g` | go to a time — `2026-09-08 04:30`, `04:30`, or an offset like `+90m` |
 | `0` | snap the clock back to now, running at 1× |
 | `?` | help — a scrollable in-app reference to every field, symbol and status chip |
@@ -280,6 +295,18 @@ it is eclipsed, and `◆` the satellite itself whenever the clock is inside the
 pass, so warping the time walks it along the arc. The star field behind it
 twinkles — the faintest stars most, the brightest almost not at all — and an
 occasional meteor streaks across the disc.
+
+**Next Passes** — a pass rising within `aos_lead` (30s by default, see
+[Presentation timings](#presentation-timings)) swaps its ordinary AOS–LOS time
+range for a live `AOS in …` countdown; once it's actually overhead that
+becomes a countdown to culmination and then to LOS — `peak in …` before the
+best-signal moment, `LOS in …` after it — with duration, peak elevation and
+bearing still alongside it the whole time. `n`/`N` (jump to the next pass) land
+the clock exactly at the start of that lead-in window, so resuming there starts
+the countdown immediately. Either way the panel's own border tints green
+(amber for a naked-eye `★` pass) and breathes while the clock reads real
+time — paused or warped, it still tints but stops pulsing, the same
+real-time-only rule the aurora oval follows.
 
 **Space weather** (NOAA SWPC) — `Kp` planetary K-index, 0–9 · `WIND` solar wind
 speed · `Bt`/`Bz` interplanetary field magnitude and its north–south component

@@ -44,6 +44,30 @@ impl Pass {
     }
 }
 
+/// The pass among `passes` that brackets `now` (`aos <= now < los`), if any —
+/// the one that can be "in progress" right now, since a single satellite's
+/// passes over one station never overlap. Shared by every place that draws
+/// or logs the AOS moment (`app::App::check_aos`, `app::App::is_animating`,
+/// `ui::panels::passes::draw`) so the same instant either reads as in
+/// progress everywhere at once or nowhere — never a border pulsing on a row
+/// that still shows the ordinary AOS–LOS range.
+pub fn pass_in_progress(passes: &[Pass], now: DateTime<Utc>) -> Option<&Pass> {
+    passes.iter().find(|p| p.aos <= now && now < p.los)
+}
+
+/// The pass among `passes` rising within `lead` of `now` — `aos - lead <=
+/// now < aos` — if any. The counterpart to [`pass_in_progress`] for the
+/// stretch just *before* AOS rather than during the pass itself: together
+/// the two cover the whole window `ui::panels::passes`'s countdown row and
+/// border pulse react to (imminent, then in progress), and `App::aos_lead()`
+/// (`config.ui.aos_lead`) is the one `lead` both that UI and
+/// `App::jump_to_next_pass` (`n`/`N`) are built around, so landing a jump
+/// there lands exactly where the countdown this function drives starts
+/// counting.
+pub fn pass_imminent(passes: &[Pass], now: DateTime<Utc>, lead: Duration) -> Option<&Pass> {
+    passes.iter().find(|p| p.aos - lead <= now && now < p.aos)
+}
+
 /// One instant along a pass as seen from the ground station: where to point,
 /// and whether the satellite is catching sunlight there.
 #[derive(Debug, Clone, Copy)]
@@ -418,5 +442,101 @@ mod tests {
             pass.los_azimuth_deg,
             arc.last().unwrap().azimuth_deg,
         );
+    }
+
+    /// A minimal, synthetic pass for `pass_in_progress`'s tests — real
+    /// propagation is irrelevant to a predicate over `aos`/`los` alone.
+    fn synthetic_pass(aos: DateTime<Utc>, minutes: i64) -> Pass {
+        Pass {
+            aos,
+            los: aos + Duration::minutes(minutes),
+            peak: aos + Duration::minutes(minutes / 2),
+            peak_elevation_deg: 45.0,
+            aos_azimuth_deg: 0.0,
+            los_azimuth_deg: 90.0,
+            peak_azimuth_deg: 45.0,
+            visible: false,
+        }
+    }
+
+    #[test]
+    fn pass_in_progress_finds_the_pass_that_brackets_now() {
+        use chrono::TimeZone;
+        let t0 = Utc.with_ymd_and_hms(2026, 9, 11, 12, 0, 0).unwrap();
+        let passes = [synthetic_pass(t0, 6), synthetic_pass(t0 + Duration::hours(2), 6)];
+
+        let midpoint = passes[0].aos + Duration::minutes(3);
+        assert_eq!(pass_in_progress(&passes, midpoint).map(|p| p.aos), Some(passes[0].aos));
+    }
+
+    #[test]
+    fn pass_in_progress_is_none_before_aos_and_at_or_after_los() {
+        use chrono::TimeZone;
+        let t0 = Utc.with_ymd_and_hms(2026, 9, 11, 12, 0, 0).unwrap();
+        let passes = [synthetic_pass(t0, 6)];
+
+        assert!(pass_in_progress(&passes, t0 - Duration::seconds(1)).is_none());
+        // `los` itself is exclusive — the pass has already set.
+        assert!(pass_in_progress(&passes, passes[0].los).is_none());
+        assert!(pass_in_progress(&passes, passes[0].los + Duration::minutes(1)).is_none());
+    }
+
+    #[test]
+    fn pass_in_progress_treats_aos_itself_as_already_under_way() {
+        use chrono::TimeZone;
+        let t0 = Utc.with_ymd_and_hms(2026, 9, 11, 12, 0, 0).unwrap();
+        let passes = [synthetic_pass(t0, 6)];
+        assert_eq!(pass_in_progress(&passes, t0).map(|p| p.aos), Some(t0));
+    }
+
+    #[test]
+    fn pass_in_progress_on_an_empty_list_is_none() {
+        assert!(pass_in_progress(&[], Utc::now()).is_none());
+    }
+
+    #[test]
+    fn pass_imminent_finds_a_pass_inside_its_own_lead_window() {
+        use chrono::TimeZone;
+        let t0 = Utc.with_ymd_and_hms(2026, 9, 11, 12, 0, 0).unwrap();
+        let passes = [synthetic_pass(t0, 6)];
+        let lead = Duration::seconds(30);
+
+        assert_eq!(
+            pass_imminent(&passes, t0 - Duration::seconds(15), lead).map(|p| p.aos),
+            Some(t0)
+        );
+        // Right at the lead boundary, inclusive.
+        assert_eq!(pass_imminent(&passes, t0 - lead, lead).map(|p| p.aos), Some(t0));
+    }
+
+    #[test]
+    fn pass_imminent_is_none_outside_the_lead_window() {
+        use chrono::TimeZone;
+        let t0 = Utc.with_ymd_and_hms(2026, 9, 11, 12, 0, 0).unwrap();
+        let passes = [synthetic_pass(t0, 6)];
+        let lead = Duration::seconds(30);
+
+        // Too early — still just an upcoming pass, not yet imminent.
+        assert!(pass_imminent(&passes, t0 - Duration::seconds(31), lead).is_none());
+    }
+
+    #[test]
+    fn pass_imminent_and_pass_in_progress_never_overlap() {
+        // The two windows meet exactly at `aos`: `pass_imminent` is
+        // strictly before it, `pass_in_progress` from it onward — so at any
+        // instant at most one of the two ever returns `Some` for the same
+        // pass, and `ui::panels::passes` can check them in either order.
+        use chrono::TimeZone;
+        let t0 = Utc.with_ymd_and_hms(2026, 9, 11, 12, 0, 0).unwrap();
+        let passes = [synthetic_pass(t0, 6)];
+        let lead = Duration::seconds(30);
+
+        assert!(pass_imminent(&passes, t0, lead).is_none(), "aos itself is in-progress, not imminent");
+        assert!(pass_in_progress(&passes, t0 - Duration::seconds(1)).is_none());
+    }
+
+    #[test]
+    fn pass_imminent_on_an_empty_list_is_none() {
+        assert!(pass_imminent(&[], Utc::now(), Duration::seconds(30)).is_none());
     }
 }

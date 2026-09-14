@@ -217,6 +217,12 @@ pub struct App {
     /// The simulated instant `passes` was computed for, so a time scrub can
     /// invalidate the list before its 20 s wall throttle would.
     passes_from: Option<DateTime<Utc>>,
+    /// The `aos` of the pass a "satellite is overhead" activity-log line was
+    /// last written for — so `check_aos` logs a pass exactly once rather than
+    /// once per frame it stays under way. Two passes of the same satellite
+    /// never share an `aos` to the second, so it doubles as that pass's
+    /// identity without needing one of its own.
+    last_aos_seen: Option<DateTime<Utc>>,
     sat_tx: watch::Sender<u64>,
     /// Submits a catalogue search query to the search task; a no-op send
     /// (nothing listening) in `--offline` mode, where submission is handled
@@ -254,18 +260,39 @@ impl App {
         self.clock.now()
     }
 
+    /// How far ahead of AOS a pass counts as imminent — `config.ui.aos_lead`,
+    /// already clamped into range by `run` at startup, converted to the
+    /// `chrono::Duration` the pass-prediction types use. Falls back to the
+    /// shipped default rather than unwrapping a conversion the clamp already
+    /// makes unreachable — the standard `anyhow`-adjacent caution here, not a
+    /// case expected to ever actually trigger.
+    pub fn aos_lead(&self) -> chrono::Duration {
+        chrono::Duration::from_std(self.config.ui.aos_lead)
+            .unwrap_or_else(|_| chrono::Duration::seconds(30))
+    }
+
     /// Whether something on screen is moving on its own right now — the
-    /// aurora shimmer, the sky plot's star twinkle — and so the render loop
-    /// should step up from `FRAME_LIVE` to `FRAME_ANIM` (see
-    /// `frame_interval`). Deliberately narrow: each clause names one visual
-    /// that actually animates, rather than a blanket "is anything
-    /// interesting focused", so an idle dashboard stays at 4 fps.
+    /// aurora shimmer, the sky plot's star twinkle, the AOS border pulse —
+    /// and so the render loop should step up from `FRAME_LIVE` to
+    /// `FRAME_ANIM` (see `frame_interval`). Deliberately narrow: each clause
+    /// names one visual that actually animates, rather than a blanket "is
+    /// anything interesting focused", so an idle dashboard stays at 4 fps.
     fn is_animating(&self) -> bool {
         let now = self.sim_now();
         let aurora_shimmering = ui::aurora_visible(self.aurora_overlay, self.clock.state())
             && self.data.read().ok().is_some_and(|d| d.aurora.get().is_some());
         let sky_plot_twinkling = ui::selected_pass(self, now).is_some();
-        aurora_shimmering || sky_plot_twinkling
+        // Matches `ui::panels::passes`'s own gate on the AOS border pulse: a
+        // warp or a pause leaves the clock as static on screen as it always
+        // was, and the pulse's phase means nothing against a clock that
+        // isn't advancing at 1×. Covers both halves of the alert — a pass
+        // about to rise (`pass_imminent`) as well as one already overhead
+        // (`pass_in_progress`) — since the border pulses through both.
+        let passes = self.upcoming_passes(now);
+        let aos_pulsing = self.clock.state() == ClockState::Live
+            && (crate::orbit::pass_in_progress(passes, now).is_some()
+                || crate::orbit::pass_imminent(passes, now, self.aos_lead()).is_some());
+        aurora_shimmering || sky_plot_twinkling || aos_pulsing
     }
 
     /// Switch focus to `panel`, resetting list scroll — a scroll position
@@ -404,6 +431,48 @@ impl App {
     /// which pass the highlight is on.
     pub fn upcoming_passes(&self, now: DateTime<Utc>) -> &[Pass] {
         &self.passes[self.passes.partition_point(|p| p.los <= now)..]
+    }
+
+    /// Log the moment the tracked satellite rises above the horizon, once per
+    /// pass — called every frame from `render_loop`, next to
+    /// `refresh_passes`. Gated on `ClockState::Live`, the same rule the AOS
+    /// border pulse (`ui::panels::passes::aos_block`) and the aurora oval
+    /// (`ui::aurora_visible`) both follow: a scrub can park the clock mid-pass
+    /// indefinitely and a warp can sweep through one every few seconds, and
+    /// neither is "the satellite rising" in any sense worth a log line —
+    /// only the clock actually running at real time is.
+    fn check_aos(&mut self) {
+        if self.clock.state() != ClockState::Live {
+            return;
+        }
+        self.log_aos_if_new();
+    }
+
+    /// The un-gated body of `check_aos`, split out so its dedupe/identity
+    /// behaviour can be tested directly against the deterministic — but
+    /// `Paused` — fixtures below, without also having to fake a live clock.
+    /// Reads only `self.passes`/`sim_now`, so it needs no data-lock read of
+    /// its own to decide anything; it only takes the write lock the one
+    /// frame it actually has something to say. `ui::draw` cannot do this
+    /// itself — it only ever takes a *read* guard on `data` — which is why
+    /// this lives on `App` rather than beside the AOS row it drives in
+    /// `ui::panels::passes`.
+    fn log_aos_if_new(&mut self) {
+        let now = self.sim_now();
+        let Some((aos, peak_elevation_deg, visible)) =
+            crate::orbit::pass_in_progress(self.upcoming_passes(now), now)
+                .map(|p| (p.aos, p.peak_elevation_deg, p.visible))
+        else {
+            return;
+        };
+        if self.last_aos_seen == Some(aos) {
+            return;
+        }
+        self.last_aos_seen = Some(aos);
+        if let Ok(mut d) = self.data.write() {
+            let star = if visible { " — naked-eye visible" } else { "" };
+            d.note(format!("AOS: satellite overhead, peak {peak_elevation_deg:.0}°{star}"));
+        }
     }
 
     fn handle_key(&mut self, key: KeyEvent) {
@@ -693,14 +762,15 @@ impl App {
         }
     }
 
-    /// Jump the clock to 30 s before the next predicted pass rises, paused
-    /// there. `visible_only` restricts to naked-eye (`★`) passes. A no-op with
-    /// a note when there is no ground station or the window holds no such pass.
+    /// Jump the clock to `config.ui.aos_lead` before the next predicted pass
+    /// rises, paused there. `visible_only` restricts to naked-eye (`★`)
+    /// passes. A no-op with a note when there is no ground station or the
+    /// window holds no such pass.
     fn jump_to_next_pass(&mut self, visible_only: bool) {
         // Land on AOS minus this, so the satellite is seen coming over the
         // horizon rather than already up.
-        let lead = chrono::Duration::seconds(30);
         let now = self.sim_now();
+        let lead = self.aos_lead();
         // `> now`, strictly: right after a jump `now == aos - lead` for the
         // pass we just landed on, so a second press must skip it and advance
         // to the following one rather than re-selecting the same pass.
@@ -1030,8 +1100,11 @@ pub async fn run(mut config: Config) -> Result<()> {
     // the dashboard describes the schedule it is actually keeping even on
     // `--offline`. A too-eager value is honoured up to its floor and no
     // further; each one raised is logged so the user can see why.
-    let (intervals, adjusted) = config.intervals.clamped();
+    let (intervals, mut adjusted) = config.intervals.clamped();
     config.intervals = intervals;
+    let (ui, ui_adjusted) = config.ui.clamped();
+    config.ui = ui;
+    adjusted.extend(ui_adjusted);
 
     // Warm-start from whatever each source last cached, so panels show the
     // last known value immediately instead of a "pending" placeholder while
@@ -1085,6 +1158,7 @@ pub async fn run(mut config: Config) -> Result<()> {
         passes: Vec::new(),
         passes_at: None,
         passes_from: None,
+        last_aos_seen: None,
         sat_tx,
         search_tx,
         tx_lookup_tx,
@@ -1140,6 +1214,7 @@ async fn render_loop(
         // reads it this frame.
         app.clock.advance();
         app.refresh_passes();
+        app.check_aos();
         app.sync_tracked_name();
         terminal
             .draw(|frame| ui::draw(frame, app))
@@ -1714,6 +1789,7 @@ mod tests {
             passes: Vec::new(),
             passes_at: None,
             passes_from: None,
+            last_aos_seen: None,
             sat_tx,
             search_tx,
             tx_lookup_tx,
@@ -1721,6 +1797,14 @@ mod tests {
             notifiers: Notifiers::new(),
             list_pos: 0,
         }
+    }
+
+    #[test]
+    fn aos_lead_reflects_a_non_default_config_value() {
+        let mut config = Config::default();
+        config.ui.aos_lead = std::time::Duration::from_secs(90);
+        let app = test_app(config);
+        assert_eq!(app.aos_lead(), chrono::Duration::seconds(90));
     }
 
     #[test]
@@ -2092,8 +2176,10 @@ mod tests {
         assert!(second - first > chrono::Duration::hours(11), "the window moved with the clock");
     }
 
-    #[test]
-    fn a_pass_already_under_way_stays_in_the_list() {
+    /// Scrubs the clock into the middle of the fixture's first predicted
+    /// pass and returns `(app, that pass)` — the shared setup for
+    /// `check_aos`'s tests below and for `a_pass_already_under_way_stays_in_the_list`.
+    fn app_mid_first_pass() -> (App, Pass) {
         let mut config = Config::default();
         config.set_location(48.0, 11.0, None);
         let mut app = test_app(config);
@@ -2103,13 +2189,150 @@ mod tests {
         app.refresh_passes();
         let first = app.passes.first().expect("the fixture yields passes").clone();
 
-        // Scrub into the middle of it and rebuild. Before the look-back, the
-        // fresh scan started at `now` and could not see a rise already behind
-        // it, so the pass vanished the moment it began.
         let midpoint = first.aos + (first.los - first.aos) / 2;
         app.clock.goto(midpoint);
         app.invalidate_passes();
         app.refresh_passes();
+        (app, first)
+    }
+
+    /// `SimClock::goto` lands on its target already `Paused`
+    /// (`simclock::goto_lands_on_the_target_and_pauses_at_one_times`), so
+    /// every fixture built from `app_mid_first_pass` is mid-pass but *not*
+    /// `Live` — exactly the case the AOS pulse must sit out. `ClockState::Live`
+    /// itself can only ever be real wall-clock time, so it has no
+    /// deterministic fixture of its own here; `ui::panels::passes`'s
+    /// `aos_block_pulses_only_while_the_clock_is_live` covers that half
+    /// directly, against a plain `ClockState` rather than a real clock.
+    #[test]
+    fn is_animating_stays_false_mid_pass_while_the_clock_is_not_live() {
+        let (app, _first) = app_mid_first_pass();
+        assert_eq!(app.clock.state(), ClockState::Paused, "fixture assumption");
+        assert!(!app.is_animating(), "a paused clock must not animate the AOS pulse");
+    }
+
+    /// Same gating, the other half of the alert: landed exactly where `n`
+    /// (`jump_to_next_pass`) would leave the clock — `aos_lead()` before the
+    /// pass, not yet risen — `goto` still leaves it `Paused`, so the pulse
+    /// must stay off there too.
+    #[test]
+    fn is_animating_stays_false_during_the_aos_lead_window_while_the_clock_is_not_live() {
+        let mut config = Config::default();
+        config.set_location(48.0, 11.0, None);
+        let mut app = test_app(config);
+        if let Ok(mut d) = app.data.write() {
+            d.tle.set_live(crate::orbit::test_tracker());
+        }
+        app.refresh_passes();
+        let first = app.passes.first().expect("the fixture yields passes").clone();
+
+        app.clock.goto(first.aos - app.aos_lead());
+        app.invalidate_passes();
+        app.refresh_passes();
+        assert_eq!(app.clock.state(), ClockState::Paused, "fixture assumption");
+        assert!(!app.is_animating(), "a paused clock must not animate the AOS lead pulse either");
+    }
+
+    #[test]
+    fn check_aos_logs_exactly_once_while_a_pass_stays_under_way() {
+        // `app_mid_first_pass` lands the clock via `SimClock::goto`, which is
+        // always `Paused` (see `is_animating_stays_false_mid_pass_while_the_
+        // clock_is_not_live`'s note) — so this drives `log_aos_if_new`
+        // directly, the un-gated body, rather than `check_aos` itself; the
+        // gate has its own test below.
+        let (mut app, _first) = app_mid_first_pass();
+        app.log_aos_if_new();
+        assert!(
+            app.data.read().unwrap().log.iter().any(|l| l.contains("AOS")),
+            "expected an AOS line in the activity log"
+        );
+        let logged_after_first_call = app.data.read().unwrap().log.len();
+
+        // Still the same pass, later in it — must not log a second time.
+        app.log_aos_if_new();
+        app.log_aos_if_new();
+        assert_eq!(
+            app.data.read().unwrap().log.len(),
+            logged_after_first_call,
+            "a pass still under way must not log AOS again"
+        );
+    }
+
+    /// The gate `check_aos` adds on top of `log_aos_if_new`: a paused clock
+    /// (or, by the same rule, a warp) must write nothing at all, however long
+    /// it sits mid-pass — the failure mode this closes off is a scrub parking
+    /// on one instant forever, or a warp flooding the 200-line log every few
+    /// seconds as it sweeps through pass after pass.
+    #[test]
+    fn check_aos_stays_silent_while_the_clock_is_not_live() {
+        let (mut app, _first) = app_mid_first_pass();
+        assert_eq!(app.clock.state(), ClockState::Paused, "fixture assumption");
+        app.check_aos();
+        assert!(
+            !app.data.read().unwrap().log.iter().any(|l| l.contains("AOS")),
+            "a paused clock must not log AOS at all"
+        );
+        assert!(app.last_aos_seen.is_none());
+    }
+
+    #[test]
+    fn check_aos_says_nothing_before_a_pass_has_risen() {
+        let mut config = Config::default();
+        config.set_location(48.0, 11.0, None);
+        let mut app = test_app(config);
+        if let Ok(mut d) = app.data.write() {
+            d.tle.set_live(crate::orbit::test_tracker());
+        }
+        app.refresh_passes();
+        // Fresh at `sim_now()` (real "now"), well before the fixture's first
+        // predicted pass — nothing should be under way yet.
+        app.log_aos_if_new();
+        assert!(app.last_aos_seen.is_none());
+        assert!(!app.data.read().unwrap().log.iter().any(|l| l.contains("AOS")));
+    }
+
+    #[test]
+    fn check_aos_logs_again_for_a_later_pass() {
+        // Re-scanning from a different `now` bisects AOS to a very slightly
+        // different instant than the first scan did — sub-microsecond, but
+        // not bit-exact — so every comparison below is a tolerance against
+        // the fixture's own snapshot rather than `assert_eq!`, the same
+        // allowance `a_pass_already_under_way_stays_in_the_list` makes.
+        let close = |a: DateTime<Utc>, b: DateTime<Utc>| (a - b).abs() < chrono::Duration::seconds(2);
+
+        let (mut app, first) = app_mid_first_pass();
+        app.log_aos_if_new();
+        let first_seen = app.last_aos_seen.expect("the pass under way should have logged");
+        assert!(close(first_seen, first.aos), "logged {first_seen} vs fixture {}", first.aos);
+
+        // Past LOS and on to the next pass's midpoint.
+        app.clock.goto(first.los + chrono::Duration::minutes(1));
+        app.invalidate_passes();
+        app.refresh_passes();
+        let Some(second) = app.passes.iter().find(|p| p.aos > first.los).cloned() else {
+            // The fixture's orbit doesn't guarantee a second pass inside the
+            // scan window every run; nothing left to assert if there isn't
+            // one, but the first-pass behaviour above already held.
+            return;
+        };
+        let midpoint = second.aos + (second.los - second.aos) / 2;
+        app.clock.goto(midpoint);
+        app.invalidate_passes();
+        app.refresh_passes();
+        app.log_aos_if_new();
+        let second_seen = app.last_aos_seen.expect("the second pass under way should have logged");
+        assert!(close(second_seen, second.aos), "logged {second_seen} vs fixture {}", second.aos);
+        assert_ne!(second_seen, first_seen, "the second pass must log under its own aos");
+    }
+
+    #[test]
+    fn a_pass_already_under_way_stays_in_the_list() {
+        // Scrubbed into the middle of the fixture's first pass by
+        // `app_mid_first_pass`. Before the look-back, a fresh scan started at
+        // `now` and could not see a rise already behind it, so the pass
+        // vanished the moment it began.
+        let (app, first) = app_mid_first_pass();
+        let midpoint = first.aos + (first.los - first.aos) / 2;
 
         let under_way = app
             .upcoming_passes(midpoint)

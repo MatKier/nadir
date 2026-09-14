@@ -185,6 +185,71 @@ mod interval_str {
     }
 }
 
+/// Presentation timings, as written under `[ui]` in `config.toml` — unlike
+/// `Intervals` these govern nothing that touches the network, only how the
+/// dashboard paces itself.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct Ui {
+    /// How far ahead of AOS the NEXT PASSES panel starts treating a pass as
+    /// imminent rather than merely upcoming: `n`/`N` (`App::jump_to_next_pass`)
+    /// land the clock here, and it's also the width of the "▲ AOS in …s"
+    /// countdown row switches to (`orbit::pass_imminent`) and starts pulsing
+    /// the panel border for (`App::is_animating`). One value for all three, so
+    /// pressing `n` always lands you exactly at the moment the countdown
+    /// starts, rather than the numbers happening to agree by coincidence.
+    #[serde(default = "default_aos_lead", with = "interval_str")]
+    pub aos_lead: Duration,
+}
+
+fn default_aos_lead() -> Duration {
+    Duration::from_secs(30)
+}
+
+impl Default for Ui {
+    fn default() -> Self {
+        Self { aos_lead: default_aos_lead() }
+    }
+}
+
+impl Ui {
+    /// The allowed range for `aos_lead`. The floor keeps the lead-in window
+    /// from collapsing to nothing; the ceiling is real, not taste —
+    /// `ui::panels::passes::fmt_mmss` has no hours field, and a multi-hour lead
+    /// would put several rows into countdown mode at once.
+    const AOS_LEAD_MIN: Duration = Duration::from_secs(5);
+    const AOS_LEAD_MAX: Duration = Duration::from_secs(10 * 60);
+
+    /// The effective values — each clamped into its allowed range — plus a
+    /// human-readable line for every value that was moved, to be surfaced in
+    /// the activity log. Mirrors `Intervals::clamped`'s shape, but clamps a
+    /// range rather than only a floor: these have a real ceiling too.
+    pub fn clamped(self) -> (Self, Vec<String>) {
+        let mut notes = Vec::new();
+        let mut clamp = |value: Duration, min: Duration, max: Duration, field: &str| {
+            if value < min {
+                notes.push(format!(
+                    "{field} {} raised to the {} minimum",
+                    fmt_interval(value),
+                    fmt_interval(min),
+                ));
+                min
+            } else if value > max {
+                notes.push(format!(
+                    "{field} {} lowered to the {} maximum",
+                    fmt_interval(value),
+                    fmt_interval(max),
+                ));
+                max
+            } else {
+                value
+            }
+        };
+        let clamped =
+            Self { aos_lead: clamp(self.aos_lead, Self::AOS_LEAD_MIN, Self::AOS_LEAD_MAX, "AOS lead") };
+        (clamped, notes)
+    }
+}
+
 /// One downlink a satellite is known to transmit on, seeded from a one-shot
 /// SatNOGS DB lookup when the satellite is first tracked. See
 /// [`Config::downlinks`] for where and why this is stored.
@@ -252,6 +317,11 @@ pub struct Config {
     /// shipped default.
     #[serde(default)]
     pub intervals: Intervals,
+    /// Presentation timings — currently just the AOS lead-in window. Missing
+    /// entirely, or missing individual keys, on an older config file — each
+    /// field falls back to its shipped default, same as `intervals`.
+    #[serde(default)]
+    pub ui: Ui,
 
     /// Path this config was loaded from; not serialised.
     #[serde(skip)]
@@ -307,6 +377,7 @@ impl Default for Config {
             allow_geoip: true,
             offline: false,
             intervals: Intervals::default(),
+            ui: Ui::default(),
             path: PathBuf::new(),
             is_new: true,
             location_query: None,
@@ -819,5 +890,45 @@ mod tests {
         let (out, notes) = relaxed.clamped();
         assert_eq!(out.tle, Duration::from_secs(48 * 3600));
         assert!(notes.is_empty());
+    }
+
+    #[test]
+    fn a_ui_table_round_trips_through_toml() {
+        let mut c = Config::default();
+        c.ui = Ui { aos_lead: Duration::from_secs(45) };
+        let text = toml::to_string_pretty(&c).unwrap();
+        let back: Config = toml::from_str(&text).unwrap();
+        assert_eq!(back.ui, c.ui);
+    }
+
+    #[test]
+    fn a_config_file_without_a_ui_table_gets_the_defaults() {
+        let c: Config = toml::from_str("sat = 25544\n").unwrap();
+        assert_eq!(c.ui, Ui::default());
+    }
+
+    #[test]
+    fn ui_clamped_raises_a_too_short_value_to_its_floor_and_reports_it() {
+        let eager = Ui { aos_lead: Duration::from_secs(1) };
+        let (out, notes) = eager.clamped();
+        assert_eq!(out.aos_lead, Ui::AOS_LEAD_MIN);
+        assert_eq!(notes.len(), 1, "one line for the value raised");
+        assert!(notes.iter().any(|n| n.contains("AOS lead") && n.contains("raised")));
+    }
+
+    #[test]
+    fn ui_clamped_lowers_a_too_long_value_to_its_ceiling_and_reports_it() {
+        let lazy = Ui { aos_lead: Duration::from_secs(3600) };
+        let (out, notes) = lazy.clamped();
+        assert_eq!(out.aos_lead, Ui::AOS_LEAD_MAX);
+        assert_eq!(notes.len(), 1, "one line for the value lowered");
+        assert!(notes.iter().any(|n| n.contains("AOS lead") && n.contains("lowered")));
+    }
+
+    #[test]
+    fn ui_clamped_leaves_the_shipped_defaults_untouched() {
+        let (out, notes) = Ui::default().clamped();
+        assert_eq!(out, Ui::default());
+        assert!(notes.is_empty(), "a stock config must never log an adjustment");
     }
 }

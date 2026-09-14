@@ -576,6 +576,16 @@ pub(in crate::ui) const PANEL_CHROME: usize = 6;
 pub fn panel_block(panel: Panel, title: &str, focused: bool) -> Block<'_> {
     let border = if focused { Theme::FRAME_FOCUS } else { Theme::FRAME };
     let title_color = if focused { Theme::FRAME_FOCUS } else { Theme::LABEL };
+    panel_block_styled(panel, title, border, title_color)
+}
+
+/// [`panel_block`] with the border and title colours given directly rather
+/// than derived from focus — for the one case a panel's border carries
+/// information beyond who holds keyboard focus: NEXT PASSES pulsing while a
+/// pass is overhead (`ui::panels::passes`). `panel_block` is a thin wrapper
+/// over this for every other call site, so both stay visually identical
+/// outside that one case.
+pub fn panel_block_styled(panel: Panel, title: &str, border: Color, title_color: Color) -> Block<'_> {
     Block::bordered().border_style(Style::new().fg(border)).title(Line::from(vec![
         Span::raw(" "),
         Span::styled(panel.key().to_string(), Style::new().fg(Theme::SAT).bold()),
