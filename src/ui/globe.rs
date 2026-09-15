@@ -40,6 +40,7 @@ use crate::orbit::{SatState, Tracker};
 use crate::ui::canvas::Grid;
 use crate::ui::coastline::COASTLINE;
 use crate::ui::skyplot::disc_bounds;
+use crate::ui::track::{track_scene, TrackScene};
 use crate::ui::{is_focused, panel_block, Theme};
 
 /// Degrees of longitude the auto-rotation drifts per second while no
@@ -54,6 +55,9 @@ pub fn draw(
     app: &App,
     sat: Option<&(Tracker, SatState)>,
     now: DateTime<Utc>,
+    // How far into the acquisition sweep the tracked element set is — `1.0`
+    // outside a sweep. See `ui::track` and `ui::ACQUIRE_REVEAL`.
+    reveal: f32,
 ) {
     let block = panel_block(Panel::Map, "GLOBE", is_focused(app, Panel::Map) || app.map_fullscreen);
     let inner = block.inner(area);
@@ -74,25 +78,12 @@ pub fn draw(
     };
 
     let station = app.config.ground_station();
-    let track_future = sat.map(|(tr, _)| {
-        tr.ground_track(
-            now,
-            chrono::Duration::zero(),
-            chrono::Duration::minutes(65),
-            chrono::Duration::seconds(20),
-        )
-    });
-    let track_past = sat.map(|(tr, _)| {
-        tr.ground_track(
-            now,
-            chrono::Duration::minutes(35),
-            chrono::Duration::zero(),
-            chrono::Duration::seconds(20),
-        )
-    });
-    let footprint = sat.map(|(_, s)| crate::geo::footprint_ring(&s.sub_point, s.footprint_km, 180));
+    // Same derivation as the flat map's — see `map::draw`'s note — so the
+    // two views can never show a different trail length or reveal progress
+    // for the same clock state.
+    let track = sat.map(|(tr, s)| track_scene(tr, s, now, app.clock.state(), reveal));
 
-    let scene = Scene { has_sat: sat.is_some(), station, track_past, track_future, footprint };
+    let scene = Scene { has_sat: sat.is_some(), station, track };
 
     let (x_bounds, y_bounds) = disc_bounds(inner);
     let grid = Grid { inner, x: x_bounds, y: y_bounds };
@@ -111,9 +102,9 @@ pub fn draw(
 struct Scene {
     has_sat: bool,
     station: Option<GeoPoint>,
-    track_past: Option<Vec<Vec<GeoPoint>>>,
-    track_future: Option<Vec<Vec<GeoPoint>>>,
-    footprint: Option<Vec<Vec<GeoPoint>>>,
+    /// See `map::Scene::track` — the same shared derivation, `None` exactly
+    /// when `has_sat` is false.
+    track: Option<TrackScene>,
 }
 
 /// The night wash's sampled cells, bucketed the same way `map::Wash` is —
@@ -219,18 +210,22 @@ fn paint_scene(ctx: &mut Context<'_>, grid: &Grid, centre: &GeoPoint, scene: &Sc
         ctx.layer();
     }
 
-    if let Some(segments) = &scene.footprint {
-        if draw_globe_polyline(ctx, centre, segments, Theme::FOOTPRINT) {
+    if let Some(track) = &scene.track {
+        if draw_globe_polyline(ctx, centre, &track.footprint, Theme::FOOTPRINT) {
             ctx.layer();
         }
-    }
-    if let Some(segments) = &scene.track_past {
-        if draw_globe_polyline(ctx, centre, segments, Theme::TRACK_PAST) {
+        // The globe has no fade to spend on a comet tail (see `map::
+        // paint_scene`'s gradient version), so the two windows get flat
+        // colours instead — but which physical window is "trailing" (dim)
+        // versus "leading" (bright, the direction of travel) still swaps in
+        // reverse, the same as the flat map, so the two views agree on what
+        // bright and dim mean even though only one of them can fade.
+        let (trailing, leading) =
+            if track.reversed { (&track.future, &track.past) } else { (&track.past, &track.future) };
+        if draw_globe_polyline(ctx, centre, trailing, Theme::TRACK_PAST) {
             ctx.layer();
         }
-    }
-    if let Some(segments) = &scene.track_future {
-        if draw_globe_polyline(ctx, centre, segments, Theme::TRACK_FUTURE) {
+        if draw_globe_polyline(ctx, centre, leading, Theme::TRACK_FUTURE) {
             ctx.layer();
         }
     }

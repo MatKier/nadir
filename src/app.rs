@@ -237,6 +237,17 @@ pub struct App {
     /// never share an `aos` to the second, so it doubles as that pass's
     /// identity without needing one of its own.
     last_aos_seen: Option<DateTime<Utc>>,
+    /// The NORAD id the acquisition sweep (`ui::track`) is currently playing
+    /// for, and when its element set arrived — `pub` because `ui::draw`
+    /// reads it to compute how far the sweep has reached, the same reason
+    /// `globe`/`sun_moon` are `pub` rather than private. Keyed on the id
+    /// rather than on `Source::get`'s freshness so a routine 12-hourly
+    /// refresh of the *same* satellite swaps in a new `Tracker` without
+    /// replaying the sweep — only an actual switch does that. Never reset to
+    /// `None`: once a sweep has run its course `ui::anim::reveal` reads it as
+    /// permanently complete, so there's nothing to gain from clearing it and
+    /// somewhere for the last switch's identity to be lost if it were.
+    pub acquired: Option<(u64, Instant)>,
     sat_tx: watch::Sender<u64>,
     /// Submits a catalogue search query to the search task; a no-op send
     /// (nothing listening) in `--offline` mode, where submission is handled
@@ -321,7 +332,12 @@ impl App {
         let aos_pulsing = self.clock.state() == ClockState::Live
             && (crate::orbit::pass_in_progress(passes, now).is_some()
                 || crate::orbit::pass_imminent(passes, now, self.aos_lead()).is_some());
-        aurora_shimmering || sky_plot_twinkling || aos_pulsing || splash_revealing
+        // Only while the acquisition sweep (`ui::track`) is actually
+        // mid-flight — an acquisition that finished seconds ago has nothing
+        // left moving, so this can't be the blanket "is a satellite tracked"
+        // the other clauses are careful to avoid being either.
+        let acquiring = self.acquired.is_some_and(|(_, at)| at.elapsed() < ui::ACQUIRE_REVEAL);
+        aurora_shimmering || sky_plot_twinkling || aos_pulsing || splash_revealing || acquiring
     }
 
     /// Switch focus to `panel`, resetting list scroll — a scroll position
@@ -1042,6 +1058,25 @@ impl App {
             let _ = self.config.save();
         }
     }
+
+    /// Start the acquisition sweep the moment a *new* element set actually
+    /// arrives — called every frame from `render_loop`, next to
+    /// `sync_tracked_name`, since starting it on `switch_satellite`'s own
+    /// keypress would play the sweep against the empty map `d.tle =
+    /// Source::default()` leaves behind and finish it before the new
+    /// `Tracker` exists to draw. Kept as its own method rather than folded
+    /// into `sync_tracked_name` — that one returns early whenever there's no
+    /// name yet, and this needs to run independently of whether one has
+    /// arrived. A routine refresh of the satellite already being tracked
+    /// leaves `norad_id()` unchanged and so is a no-op here, same as
+    /// `switch_satellite`'s own re-select guard.
+    fn note_acquisition(&mut self) {
+        let data = self.data.read().ok();
+        let Some(id) = data.as_ref().and_then(|d| d.tle.get()).map(Tracker::norad_id) else { return };
+        if self.acquired.is_none_or(|(seen, _)| seen != id) {
+            self.acquired = Some((id, Instant::now()));
+        }
+    }
 }
 
 /// Entry point from `main`. Owns the terminal for the duration of the
@@ -1205,6 +1240,7 @@ pub async fn run(mut config: Config, skip_splash: bool) -> Result<()> {
         passes_at: None,
         passes_from: None,
         last_aos_seen: None,
+        acquired: None,
         sat_tx,
         search_tx,
         tx_lookup_tx,
@@ -1262,6 +1298,7 @@ async fn render_loop(
         app.refresh_passes();
         app.check_aos();
         app.sync_tracked_name();
+        app.note_acquisition();
         terminal
             .draw(|frame| ui::draw(frame, app))
             .context("drawing a frame")?;
@@ -1840,6 +1877,7 @@ mod tests {
             passes_at: None,
             passes_from: None,
             last_aos_seen: None,
+            acquired: None,
             sat_tx,
             search_tx,
             tx_lookup_tx,
@@ -1926,6 +1964,20 @@ mod tests {
     }
 
     #[test]
+    fn is_animating_covers_an_acquisition_reveal_still_in_flight() {
+        let mut app = test_app(Config::default());
+        app.acquired = Some((25544, Instant::now()));
+        assert!(app.is_animating(), "a sweep that just started should still be animating");
+    }
+
+    #[test]
+    fn is_animating_ignores_an_acquisition_reveal_that_has_finished() {
+        let mut app = test_app(Config::default());
+        app.acquired = Some((25544, Instant::now() - ui::ACQUIRE_REVEAL - Duration::from_millis(1)));
+        assert!(!app.is_animating(), "a sweep that has already finished has nothing left moving");
+    }
+
+    #[test]
     fn remove_tracked_refuses_the_satellite_currently_being_tracked() {
         let mut config = Config::default();
         config.sat = 25544;
@@ -2004,6 +2056,37 @@ mod tests {
         }
         app.sync_tracked_name();
         assert_eq!(app.config.tracked_name(25544), Some("ISS (ZARYA)"));
+    }
+
+    #[test]
+    fn note_acquisition_records_a_newly_arrived_element_set() {
+        let mut app = test_app(Config::default());
+        assert!(app.acquired.is_none(), "fixture assumption: nothing tracked yet");
+        if let Ok(mut d) = app.data.write() {
+            d.tle.set_live(crate::orbit::test_tracker());
+        }
+        app.note_acquisition();
+        let (id, _) = app.acquired.expect("an arriving element set should start the sweep");
+        assert_eq!(id, 25544);
+    }
+
+    #[test]
+    fn note_acquisition_ignores_a_refreshed_element_set_for_the_same_satellite() {
+        let mut app = test_app(Config::default());
+        if let Ok(mut d) = app.data.write() {
+            d.tle.set_live(crate::orbit::test_tracker());
+        }
+        // Backdated well past any real gap between two `Instant::now()`
+        // calls, so a replay would be unmistakable rather than lost in a
+        // handful of nanoseconds.
+        app.acquired = Some((25544, Instant::now() - Duration::from_secs(5)));
+        app.note_acquisition();
+        let (id, at) = app.acquired.expect("still set");
+        assert_eq!(id, 25544);
+        assert!(
+            at.elapsed() >= Duration::from_secs(5),
+            "a routine refresh of the same satellite must not replay the sweep"
+        );
     }
 
     #[test]

@@ -132,8 +132,8 @@ fn content(app: &App) -> Vec<Line<'static>> {
     row(&mut l, "☉", "with `o` on: the subsolar point — where the Sun is directly overhead");
     row(&mut l, "○◔◑◕●", "with `o` on: the sublunar point — the glyph is the Moon's phase");
     row(&mut l, "· / +", "with `p` on: a labelled city / satellite ground station");
-    row(&mut l, "bright line", "the next 65 minutes of ground track");
-    row(&mut l, "fading line", "the past 35 minutes of ground track — dimmest at −35m, brightening to meet the satellite");
+    row(&mut l, "bright line", "the next 65 minutes of ground track, at 1×");
+    row(&mut l, "fading line", "the past 35 minutes at 1× — dimmest at −35m, brightening to meet the satellite");
     row(&mut l, "violet ring", "the visibility footprint — where the satellite is above 0°");
     row(&mut l, "amber dots", "the day/night terminator");
     row(&mut l, "dark ground", "the night side of the Earth");
@@ -149,6 +149,15 @@ fn content(app: &App) -> Vec<Line<'static>> {
     text(&mut l, "`p` labels prominent cities and ground stations, drawing as many as");
     text(&mut l, "fit without overlapping — so a whole-world map shows only a scattered");
     text(&mut l, "few and more fill in the further `+` zooms in, or `m` widens the map.");
+    text(&mut l, "Warping the clock (`,`/`.`) stretches the fading line with it — up to");
+    text(&mut l, "a few revolutions at the fastest speeds — so a fast warp reads as");
+    text(&mut l, "motion instead of the satellite teleporting frame to frame. Reverse");
+    text(&mut l, "warp stretches the bright line instead: the trail always follows");
+    text(&mut l, "behind whichever way the satellite is actually travelling.");
+    text(&mut l, "Switching satellites (`s`, or `Enter` on Tracked) plays a brief sweep");
+    text(&mut l, "once the new element set arrives — the track draws in from the");
+    text(&mut l, "sub-satellite point and the footprint blooms to full radius — rather");
+    text(&mut l, "than the new picture simply appearing.");
     text(&mut l, "`o` toggles the Sun/Moon markers; both are off by default.");
     text(&mut l, "`a` shades the night side's aurora probability in three brightening");
     text(&mut l, "green tiers, off by default and drawing nothing until the feed has");

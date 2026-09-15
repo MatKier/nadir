@@ -11,6 +11,8 @@
 //! session started, immune to all of that, so it's the phase source for
 //! everything in this module.
 
+use std::time::Duration;
+
 use ratatui::style::Color;
 
 /// A 0..1 triangle wave with the given period in seconds — up for the first
@@ -88,6 +90,23 @@ pub(in crate::ui) fn lerp(a: Color, b: Color, t: f32) -> Color {
 fn lerp_channel(a: u8, b: u8, t: f32) -> u8 {
     let v = a as f32 + (b as f32 - a as f32) * t;
     v.round().clamp(0.0, 255.0) as u8
+}
+
+/// Eased 0..1 progress through a reveal of length `span`, `elapsed` since it
+/// started — the acquisition sweep's ground track and footprint bloom both
+/// scale their geometry by this fraction (`ui::track::track_scene`). Square-
+/// root eased so the early frames cover most of the distance: at
+/// `FRAME_ANIM`'s 100 ms an 800 ms reveal is only eight frames, and a linear
+/// ramp over eight steps reads as stepping rather than sweeping — easing the
+/// front-loads the motion into more of those few frames. A zero-length span
+/// reads as already complete rather than dividing by zero, the same guard
+/// [`pulse`] makes for a non-positive period.
+pub(in crate::ui) fn reveal(elapsed: Duration, span: Duration) -> f32 {
+    if span.is_zero() {
+        return 1.0;
+    }
+    let t = (elapsed.as_secs_f32() / span.as_secs_f32()).clamp(0.0, 1.0);
+    t.sqrt()
 }
 
 #[cfg(test)]
@@ -183,5 +202,39 @@ mod tests {
         let b = Color::Rgb(10, 20, 30);
         assert_eq!(lerp(a, b, 0.9), b);
         assert_eq!(lerp(a, b, 0.1), a);
+    }
+
+    #[test]
+    fn a_reveal_reaches_one_exactly_at_its_span() {
+        let span = Duration::from_millis(800);
+        assert_eq!(reveal(span, span), 1.0);
+    }
+
+    #[test]
+    fn a_reveal_is_monotonic_across_its_span() {
+        let span = Duration::from_millis(800);
+        let mut last = 0.0;
+        for ms in 0..=800u64 {
+            let v = reveal(Duration::from_millis(ms), span);
+            assert!(v >= last, "reveal dipped at {ms}ms: {v} < {last}");
+            last = v;
+        }
+    }
+
+    #[test]
+    fn a_reveal_covers_most_of_its_distance_in_its_first_half() {
+        // The whole point of the square-root ease over a linear one: at the
+        // midpoint a linear ramp would read 0.5, but this should already be
+        // well past it, since `FRAME_ANIM`'s 100ms steps leave only a
+        // handful of frames to work with.
+        let span = Duration::from_millis(800);
+        let v = reveal(span / 2, span);
+        assert!(v > 0.65, "expected the midpoint past 0.65, got {v}");
+    }
+
+    #[test]
+    fn a_reveal_of_zero_span_is_complete_rather_than_dividing_by_zero() {
+        assert_eq!(reveal(Duration::from_millis(100), Duration::ZERO), 1.0);
+        assert_eq!(reveal(Duration::ZERO, Duration::ZERO), 1.0);
     }
 }

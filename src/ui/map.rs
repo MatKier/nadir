@@ -1,7 +1,7 @@
 //! The world-map panel: coastlines, night shading, ground track, footprint,
 //! ground station and the satellite itself.
 
-use chrono::{DateTime, Duration, Utc};
+use chrono::{DateTime, Utc};
 use ratatui::layout::Rect;
 use ratatui::style::{Color, Style};
 use ratatui::symbols::Marker;
@@ -11,13 +11,14 @@ use ratatui::Frame;
 
 use crate::api::swpc::AuroraGrid;
 use crate::app::{App, Panel};
-use crate::geo::{footprint_ring, GeoPoint};
+use crate::geo::GeoPoint;
 use crate::orbit::solar::{subsolar_point, terminator_polyline, SunGeometry, CIVIL_TWILIGHT_DEG};
 use crate::orbit::{moon_phase, sublunar_point, SatState, Tracker};
 use crate::ui::anim::{lerp, noise};
 use crate::ui::canvas::Grid;
 use crate::ui::panels::truncate;
 use crate::ui::places::{Place, PLACES};
+use crate::ui::track::{track_scene, TrackScene};
 use crate::ui::{is_focused, panel_block, PadMarker, Theme};
 
 /// Longitude half-spans of the follow window, widest first — each level halves
@@ -75,6 +76,9 @@ pub fn draw(
     now: DateTime<Utc>,
     pad: Option<PadMarker>,
     aurora: Option<&AuroraGrid>,
+    // How far into the acquisition sweep the tracked element set is — `1.0`
+    // outside a sweep. See `ui::track` and `ui::ACQUIRE_REVEAL`.
+    reveal: f32,
 ) {
     // The follow-window centre — `Some` only once we're following *and* an
     // element set has arrived, so the zoom indicator and the bounds can never
@@ -101,17 +105,12 @@ pub fn draw(
     let (x_bounds, y_bounds) = view_bounds(centre, app.zoom);
 
     let station = app.config.ground_station();
-    let track_future = sat.map(|(tr, _)| {
-        tr.ground_track(now, Duration::zero(), Duration::minutes(65), Duration::seconds(20))
-    });
-    let track_past = sat.map(|(tr, _)| {
-        tr.ground_track(now, Duration::minutes(35), Duration::zero(), Duration::seconds(20))
-    });
-    // The visibility footprint as a great-circle ring, split at the ±180°
-    // meridian like the tracks are — a spherical cap, so it bulges in
-    // longitude towards the poles rather than staying a projected circle, and
-    // its far half wraps onto the opposite map edge instead of being clipped.
-    let footprint = sat.map(|(_, s)| footprint_ring(&s.sub_point, s.footprint_km, 180));
+    // The ground track, footprint and warp-trail/acquisition-sweep geometry,
+    // all derived by `ui::track` from the clock's own state so this pane and
+    // the globe can't disagree on how long the trail is or how far a sweep
+    // has reached. `sat` already carries a `SatState` propagated to `now`, so
+    // `track_scene` needs no time of its own beyond `now` itself.
+    let track = sat.map(|(tr, s)| track_scene(tr, s, now, app.clock.state(), reveal));
 
     let terminator: Vec<(f64, f64)> = terminator_polyline(now, 240)
         .into_iter()
@@ -132,9 +131,7 @@ pub fn draw(
         sat,
         pad,
         station,
-        track_past,
-        track_future,
-        footprint,
+        track,
         terminator,
         places: app.places,
         sun,
@@ -173,9 +170,10 @@ struct Scene<'a> {
     sat: Option<&'a (Tracker, SatState)>,
     pad: Option<PadMarker<'a>>,
     station: Option<GeoPoint>,
-    track_past: Option<Vec<Vec<GeoPoint>>>,
-    track_future: Option<Vec<Vec<GeoPoint>>>,
-    footprint: Option<Vec<Vec<GeoPoint>>>,
+    /// The ground track, footprint and warp/acquisition state, gathered by
+    /// `ui::track::track_scene` — `None` exactly when `sat` is, since none
+    /// of it means anything without a propagated position to draw it around.
+    track: Option<TrackScene>,
     terminator: Vec<(f64, f64)>,
     /// Whether the `p` layer of prominent-place labels is on.
     places: bool,
@@ -249,19 +247,28 @@ fn paint_scene(ctx: &mut Context<'_>, grid: &Grid, scene: &Scene<'_>, wash: &Was
     // `ctx.layer()` pushes unconditionally, so only call it where a feature
     // actually drew; an empty layer renders as a no-op but still allocates a
     // full-grid buffer.
-    if let Some(segments) = &scene.footprint {
-        draw_polyline(ctx, segments, Theme::FOOTPRINT);
+    if let Some(track) = &scene.track {
+        draw_polyline(ctx, &track.footprint, Theme::FOOTPRINT);
         ctx.layer();
-    }
-    if let Some(segments) = &scene.track_past {
-        // A comet tail: dim at −35 min, brightening to meet TRACK_FUTURE's
-        // own colour right at the satellite, so the two halves read as one
-        // continuous line rather than a seam at "now".
-        draw_fading_polyline(ctx, segments, Theme::TRACK_PAST, Theme::TRACK_FUTURE);
+
+        // A comet tail on whichever window is actually the one trailing
+        // behind the satellite's direction of travel — `past` running
+        // forward, `future` when the clock is warping in reverse (see
+        // `ui::track::trail_windows`) — brightening to meet the flat leading
+        // window's own colour right at the satellite, so the two halves read
+        // as one continuous line rather than a seam at "now". The leading
+        // window is always drawn in `TRACK_FUTURE`'s bright colour: forward
+        // that's literally the future track; in reverse it's `past`, but the
+        // colour still means "the direction the satellite is heading",
+        // which in reverse *is* decreasing sim time.
+        let (trailing, leading, fade_old, fade_new) = if track.reversed {
+            (&track.future, &track.past, Theme::TRACK_FUTURE, Theme::TRACK_PAST)
+        } else {
+            (&track.past, &track.future, Theme::TRACK_PAST, Theme::TRACK_FUTURE)
+        };
+        draw_fading_polyline(ctx, trailing, fade_old, fade_new);
         ctx.layer();
-    }
-    if let Some(segments) = &scene.track_future {
-        draw_polyline(ctx, segments, Theme::TRACK_FUTURE);
+        draw_polyline(ctx, leading, Theme::TRACK_FUTURE);
         ctx.layer();
     }
 
@@ -1629,13 +1636,22 @@ mod tests {
         let ring = vec![vec![GeoPoint::new(50.0, 0.0, 0.0), GeoPoint::new(50.0, 120.0, 0.0)]];
 
         let render = |footprint: Option<Vec<Vec<GeoPoint>>>| {
+            // `past`/`future` empty rather than `None` isolates the
+            // footprint under test: an empty segment list draws nothing, the
+            // same as the track fields being absent altogether, but keeps
+            // `TrackScene` a single struct rather than needing its own
+            // optionality on top of `scene.track`'s.
+            let track = footprint.map(|footprint| TrackScene {
+                past: Vec::new(),
+                future: Vec::new(),
+                footprint,
+                reversed: false,
+            });
             let scene = Scene {
                 sat: None,
                 pad: None,
                 station: None,
-                track_past: None,
-                track_future: None,
-                footprint,
+                track,
                 terminator: Vec::new(),
                 places: false,
                 // Parked well away from the 50°N/0–120°E ring under test, so

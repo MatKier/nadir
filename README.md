@@ -300,7 +300,16 @@ stepped, jumped or paused) since the nowcast is a real-world snapshot that
 doesn't track the displayed instant; its tiers shimmer slowly rather than
 sitting flat, reading as drifting curtains. The ground track behind the
 satellite fades with age — brightest where it meets the sub-satellite point,
-dimmest at its −35 minute end — rather than one flat colour.
+dimmest at its −35 minute end at ordinary speed — rather than one flat colour.
+Warping the clock stretches that trail with it, up to a few revolutions at the
+fastest speeds, so a fast warp reads as visible motion instead of the
+satellite teleporting frame to frame; running the clock in reverse stretches
+the *other* end instead, since the trail always follows behind whichever way
+the satellite is actually travelling. Switching to a different tracked
+satellite plays a brief acquisition sweep once its element set arrives — the
+ground track draws itself in from the sub-satellite point outward and the
+footprint blooms to full radius — rather than the new track and footprint
+simply appearing.
 While the Passes panel has focus this pane shows a sky plot of the
 highlighted pass instead — `▲`/`▼` its rise and set on the horizon rim, `◇`
 its culmination, the arc bright where the satellite is sunlit and dim where

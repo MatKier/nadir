@@ -10,10 +10,13 @@ mod panels;
 mod places;
 mod skyplot;
 mod stars;
+mod track;
 
 /// The tightest follow-mode zoom index, re-exported so `App::zoom_in` can
 /// saturate against it without `mod map` being made public.
 pub(crate) use map::MAX_ZOOM;
+
+use std::time::Duration;
 
 use chrono::{DateTime, Duration as ChronoDuration, Utc};
 use ratatui::layout::{Alignment, Constraint, Layout, Rect};
@@ -27,6 +30,17 @@ use crate::geo::GeoPoint;
 use crate::orbit::{Pass, Tracker};
 use crate::simclock::ClockState;
 use crate::source::Health;
+
+/// How long the acquisition sweep takes: the ground track drawing itself in
+/// from the sub-satellite point and the footprint blooming to full radius,
+/// once a newly tracked satellite's element set actually arrives (see
+/// `App::note_acquisition`). Eight frames at `FRAME_ANIM` (100ms) — long
+/// enough to read as a sweep rather than a cut, short enough that switching
+/// satellites repeatedly doesn't feel like waiting on a load screen.
+/// `pub(crate)` rather than private like most of this module's constants
+/// because `App::is_animating` (`app.rs`) needs it too, to know when the
+/// sweep has finished and stop asking for the faster frame rate.
+pub(crate) const ACQUIRE_REVEAL: Duration = Duration::from_millis(800);
 
 /// Palette — a calm mission-control console: cyan structure, green nominal,
 /// amber caution, red alert, on the terminal's own background.
@@ -129,6 +143,13 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
     // grid — a failed or still-pending fetch just means no oval this frame,
     // never a panic or a blank grid drawn as though it were real data.
     let aurora = data.aurora.get().filter(|_| aurora_visible(app.aurora_overlay, app.clock.state()));
+    // How far into the acquisition sweep the currently-tracked element set
+    // is — `1.0` (fully drawn in) outside a sweep, or whenever nothing is
+    // tracked yet, since there is no track to grow from a point in that
+    // case. Computed once here, on wall time as `ui::anim`'s module doc
+    // requires, so the flat map and the globe can't disagree about how far
+    // the sweep has reached.
+    let reveal = app.acquired.map_or(1.0, |(_, at)| anim::reveal(at.elapsed(), ACQUIRE_REVEAL));
 
     if app.map_fullscreen {
         let [title, body, status] = Layout::vertical([
@@ -143,9 +164,9 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
         // second way to reach the plot. `b`'s globe toggle isn't that kind of
         // override, so it still applies here.
         if app.globe {
-            globe::draw(frame, body, app, sat_state.as_ref(), now);
+            globe::draw(frame, body, app, sat_state.as_ref(), now, reveal);
         } else {
-            map::draw(frame, body, app, sat_state.as_ref(), now, pad, aurora);
+            map::draw(frame, body, app, sat_state.as_ref(), now, pad, aurora, reveal);
         }
         status_bar(frame, status, app, &data);
     } else {
@@ -196,8 +217,8 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
             // yields to the sky plot above (a pass actually highlighted is
             // the more specific, more urgent thing to show) but otherwise
             // takes the pane over from the ordinary flat map.
-            _ if app.globe => globe::draw(frame, map_area, app, sat_state.as_ref(), now),
-            _ => map::draw(frame, map_area, app, sat_state.as_ref(), now, pad, aurora),
+            _ if app.globe => globe::draw(frame, map_area, app, sat_state.as_ref(), now, reveal),
+            _ => map::draw(frame, map_area, app, sat_state.as_ref(), now, pad, aurora, reveal),
         }
         panels::tracked::draw(frame, tracked, app);
         panels::telemetry::draw(frame, telem, app, sat_state.as_ref(), data.tle.get().is_some(), now);
