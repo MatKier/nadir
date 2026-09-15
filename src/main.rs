@@ -67,5 +67,7 @@ fn main() -> Result<()> {
         .build()
         .context("starting the async runtime")?;
 
-    runtime.block_on(nadir::app::run(config, cli.no_splash))
+    let result = runtime.block_on(nadir::app::run(config, cli.no_splash));
+    nadir::app::shutdown_runtime(runtime);
+    result
 }

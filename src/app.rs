@@ -1294,6 +1294,30 @@ pub async fn run(mut config: Config, skip_splash: bool) -> Result<()> {
     result
 }
 
+/// How long a teardown waits for the blocking pool before walking away.
+const SHUTDOWN_GRACE: Duration = Duration::from_millis(100);
+
+/// Tear down the async runtime without waiting out a stuck DNS lookup.
+///
+/// Dropping a tokio runtime blocks until every `spawn_blocking` task has
+/// finished, and nadir has exactly one user of that pool it does not control:
+/// reqwest resolves hostnames through the platform's `getaddrinfo`, which
+/// hyper-util runs on the blocking pool. Dropping the resolve future aborts
+/// the `JoinHandle` but not the thread — a blocking task that has already
+/// started runs to completion no matter what, so neither `connect_timeout` nor
+/// `timeout` bounds it. With no network that lookup sits in the resolver's
+/// retry schedule for tens of seconds, long after `run` has handed the
+/// terminal back, which reads as a hung shell rather than as a slow quit.
+///
+/// Nothing on that pool owns state worth waiting for: the config and the
+/// cache are written synchronously before `run` returns, and the fetch tasks
+/// are ordinary async tasks a runtime drop cancels anyway. So allow a brief
+/// grace for a lookup that is about to land, then leave the rest to process
+/// exit.
+pub fn shutdown_runtime(runtime: tokio::runtime::Runtime) {
+    runtime.shutdown_timeout(SHUTDOWN_GRACE);
+}
+
 /// Redraw cadence. At 1× the dashboard is a clock face and four frames a second
 /// is plenty; a warp turns it into an animation, where a 250 ms frame at 60×
 /// steps a quarter-hour of simulated time and the marker teleports rather than
@@ -1884,6 +1908,23 @@ mod tests {
     fn from_key_rejects_digits_outside_1_to_6() {
         assert_eq!(Panel::from_key(0), None);
         assert_eq!(Panel::from_key(7), None);
+    }
+
+    #[test]
+    fn shutdown_does_not_wait_for_a_started_blocking_task() {
+        let runtime = tokio::runtime::Builder::new_multi_thread().enable_all().build().unwrap();
+        // Stands in for the getaddrinfo call reqwest strands on the blocking
+        // pool when the network is down: started, uncancellable, and far
+        // longer than anyone will stare at an already-restored terminal.
+        runtime.spawn_blocking(|| std::thread::sleep(Duration::from_secs(30)));
+        // Let it actually start. An unstarted blocking task is simply
+        // dropped, so without this the test would pass without exercising
+        // the wait at all.
+        std::thread::sleep(Duration::from_millis(50));
+
+        let started = Instant::now();
+        shutdown_runtime(runtime);
+        assert!(started.elapsed() < Duration::from_secs(5), "shutdown waited {:?}", started.elapsed());
     }
 
     fn test_app(config: Config) -> App {
