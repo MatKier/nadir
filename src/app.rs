@@ -323,11 +323,12 @@ impl App {
         let aurora_shimmering = ui::aurora_visible(self.aurora_overlay, self.clock.state())
             && self.data.read().ok().is_some_and(|d| d.aurora.get().is_some());
         let sky_plot_twinkling = ui::selected_pass(self, now).is_some();
-        // The splash's reveal only runs across the first third of
-        // `config.ui.splash` (`ui::splash_reveal_count`) — the remaining
-        // two-thirds are a static hold with nothing left to animate, so this
-        // doesn't just reuse `splash_active()`.
-        let splash_revealing = self.splash_active() && self.uptime() < self.config.ui.splash / 3;
+        // The rows' own reveal (`ui::splash_reveal_count`) still only runs
+        // across the first third of `config.ui.splash`, but the splash's
+        // backdrop — its starfield and the satellite transiting the frame —
+        // now runs for the whole thing, so this is just `splash_active()`
+        // rather than that one-third cutoff.
+        let splash_playing = self.splash_active();
         // Matches `ui::panels::passes`'s own gate on the AOS border pulse: a
         // warp or a pause leaves the clock as static on screen as it always
         // was, and the pulse's phase means nothing against a clock that
@@ -343,7 +344,7 @@ impl App {
         // left moving, so this can't be the blanket "is a satellite tracked"
         // the other clauses are careful to avoid being either.
         let acquiring = self.acquired.is_some_and(|(_, at)| at.elapsed() < ui::ACQUIRE_REVEAL);
-        aurora_shimmering || sky_plot_twinkling || aos_pulsing || splash_revealing || acquiring
+        aurora_shimmering || sky_plot_twinkling || aos_pulsing || splash_playing || acquiring
     }
 
     /// Switch focus to `panel`, resetting list scroll — a scroll position
@@ -1329,19 +1330,26 @@ pub fn shutdown_runtime(runtime: tokio::runtime::Runtime) {
 /// twinkle) — 10 fps is plenty for a slow drift, and `ui::map::night_wash`
 /// resamples solar elevation over every canvas cell each frame, so matching
 /// `FRAME_WARP`'s 25 fps here would spend real CPU an idle dashboard never
-/// shows the benefit of.
+/// shows the benefit of. The boot splash's own transit is the one idle-screen
+/// effect that *does* get `FRAME_WARP`: unlike the aurora or the twinkle it
+/// isn't drawn forever, only for `config.ui.splash` (30s at the outside), and
+/// it draws no `night_wash`-style per-cell resample, so the frame it costs is
+/// cheap and bounded — worth spending to keep a satellite crossing the whole
+/// frame from stepping across it in visible jumps.
 const FRAME_LIVE: Duration = Duration::from_millis(250);
 const FRAME_ANIM: Duration = Duration::from_millis(100);
 const FRAME_WARP: Duration = Duration::from_millis(40);
 
 /// How long to wait for the next frame. Split out of `render_loop` so the
 /// cadence can be asserted without a terminal. `animating` is
-/// `App::is_animating` — threaded in as a plain `bool` for the same reason.
-fn frame_interval(state: ClockState, animating: bool) -> Duration {
+/// `App::is_animating` and `splash` is `App::splash_active` — both threaded
+/// in as plain values for the same reason.
+fn frame_interval(state: ClockState, animating: bool, splash: bool) -> Duration {
     match state {
         // A warp always wins: it's already redrawing faster than FRAME_ANIM
-        // asks for, so there's nothing left for `animating` to speed up.
+        // or the splash asks for, so there's nothing left to speed up.
         ClockState::Warp(_) => FRAME_WARP,
+        _ if splash => FRAME_WARP,
         _ if animating => FRAME_ANIM,
         // `Drifted` moves at real speed and `Paused` does not move at all,
         // so both are as static as `Live` once nothing is animating either.
@@ -1374,7 +1382,7 @@ async fn render_loop(
         // `Interval::set_period`, and a per-iteration sleep cannot build up the
         // catch-up burst `MissedTickBehavior::Skip` used to guard against.
         tokio::select! {
-            _ = tokio::time::sleep(frame_interval(app.clock.state(), app.is_animating())) => {}
+            _ = tokio::time::sleep(frame_interval(app.clock.state(), app.is_animating(), app.splash_active())) => {}
             maybe_event = input_rx.recv() => {
                 match maybe_event {
                     Some(Event::Key(key)) => {
@@ -2031,23 +2039,26 @@ mod tests {
         assert!(!app.splash_active(), "the dismissing key must win over remaining time");
     }
 
-    /// The splash's reveal (`ui::splash_reveal_count`) only spans the first
-    /// third of `config.ui.splash` — the remaining two-thirds are a static
-    /// hold with nothing left to animate — so `is_animating` must track that
-    /// one-third point, not `splash_active`'s full-duration one.
+    /// The splash's own backdrop — the starfield and the transiting
+    /// satellite — runs for the whole of `config.ui.splash`, not just the
+    /// first third the row reveal gets, so `is_animating` has to track
+    /// `splash_active`'s full-duration window rather than cutting off early.
     #[test]
-    fn is_animating_is_true_only_during_the_first_third_of_the_splash() {
+    fn is_animating_holds_for_the_whole_boot_splash() {
         let mut app = test_app(Config::default());
         app.splash_skipped = false;
         app.started = Instant::now();
-        assert!(app.is_animating(), "the splash should animate its reveal right away");
+        assert!(app.is_animating(), "the splash should animate right away");
 
         app.started = Instant::now() - app.config.ui.splash / 3;
         assert!(
-            !app.is_animating(),
-            "the remaining two-thirds of the splash are a static hold, not an animation"
+            app.is_animating(),
+            "the backdrop keeps moving through the two-thirds the row reveal holds static"
         );
         assert!(app.splash_active(), "fixture assumption: still within the splash duration");
+
+        app.started = Instant::now() - app.config.ui.splash - Duration::from_millis(1);
+        assert!(!app.is_animating(), "once the splash itself has ended there is nothing left to animate");
     }
 
     #[test]
@@ -2766,21 +2777,34 @@ mod tests {
         // The dashboard is a 4 fps clock face unless the clock is winding
         // itself forward — only a warp does that. A drift or a pause is as
         // static on screen as being live, absent anything else animating.
-        assert_eq!(frame_interval(ClockState::Live, false), FRAME_LIVE);
-        assert_eq!(frame_interval(ClockState::Drifted, false), FRAME_LIVE);
-        assert_eq!(frame_interval(ClockState::Paused, false), FRAME_LIVE);
-        assert_eq!(frame_interval(ClockState::Warp(2), false), FRAME_WARP);
-        assert_eq!(frame_interval(ClockState::Warp(-1800), false), FRAME_WARP);
+        assert_eq!(frame_interval(ClockState::Live, false, false), FRAME_LIVE);
+        assert_eq!(frame_interval(ClockState::Drifted, false, false), FRAME_LIVE);
+        assert_eq!(frame_interval(ClockState::Paused, false, false), FRAME_LIVE);
+        assert_eq!(frame_interval(ClockState::Warp(2), false, false), FRAME_WARP);
+        assert_eq!(frame_interval(ClockState::Warp(-1800), false, false), FRAME_WARP);
     }
 
     #[test]
     fn an_idle_animation_steps_up_the_cadence_but_never_past_a_warp() {
-        assert_eq!(frame_interval(ClockState::Live, true), FRAME_ANIM);
-        assert_eq!(frame_interval(ClockState::Drifted, true), FRAME_ANIM);
-        assert_eq!(frame_interval(ClockState::Paused, true), FRAME_ANIM);
+        assert_eq!(frame_interval(ClockState::Live, true, false), FRAME_ANIM);
+        assert_eq!(frame_interval(ClockState::Drifted, true, false), FRAME_ANIM);
+        assert_eq!(frame_interval(ClockState::Paused, true, false), FRAME_ANIM);
         // A warp is already redrawing faster than FRAME_ANIM, so an
         // animation flag riding along with it changes nothing.
-        assert_eq!(frame_interval(ClockState::Warp(2), true), FRAME_WARP);
+        assert_eq!(frame_interval(ClockState::Warp(2), true, false), FRAME_WARP);
+    }
+
+    /// The boot splash gets the warp-speed cadence even with the clock at
+    /// rest and nothing else animating — a satellite crossing the whole
+    /// frame over just a few seconds needs more than `FRAME_ANIM`'s 10 fps to
+    /// read as a sweep rather than a series of jumps.
+    #[test]
+    fn frame_interval_runs_the_boot_splash_at_the_warp_cadence() {
+        assert_eq!(frame_interval(ClockState::Live, false, true), FRAME_WARP);
+        assert_eq!(frame_interval(ClockState::Paused, false, true), FRAME_WARP);
+        // A warp still wins if somehow both are true at once — there is
+        // nothing left to speed the splash up further.
+        assert_eq!(frame_interval(ClockState::Warp(2), false, true), FRAME_WARP);
     }
 
     #[test]

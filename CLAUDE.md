@@ -89,9 +89,11 @@ arm so the bar advertises it.
 `ui::draw` is the sole render entry point; `render_loop` calls it every
 `frame_interval` — 250 ms idle, stepping up to 100 ms whenever
 `App::is_animating` says something on screen is moving on its own (the aurora
-shimmer, a sky-plot twinkle, the AOS border pulse, the boot splash's reveal),
-40 ms during a clock warp. It takes the `RwLock` read guard once per frame and
-drops it before drawing the help overlay.
+shimmer, a sky-plot twinkle, the AOS border pulse), 40 ms during a clock warp
+*or* the whole time the boot splash is up (`ui/splash.rs`'s starfield and
+transiting satellite run for the full `config.ui.splash`, not just the first
+third the console rows themselves reveal over). It takes the `RwLock` read
+guard once per frame and drops it before drawing the help overlay.
 
 ### Network etiquette is load-bearing
 
