@@ -323,9 +323,6 @@ pub struct Config {
     /// Whether nadir may use IP geolocation when no location is set.
     #[serde(default = "default_true")]
     pub allow_geoip: bool,
-    /// Whether to run without any network access.
-    #[serde(default)]
-    pub offline: bool,
     /// How often each timer-driven feed refetches. Missing entirely, or missing
     /// individual keys, on an older config file — each field falls back to its
     /// shipped default.
@@ -352,6 +349,15 @@ pub struct Config {
     /// search at startup once a network client exists. Never persisted.
     #[serde(skip)]
     pub sat_query: Option<String>,
+    /// Whether to run without any network access — `--offline` only, never
+    /// read from or written to `config.toml`: a per-launch flag like
+    /// `--no-splash`, not a setting, so a session started offline can't pin
+    /// every later launch to it with no `--online` to undo it. An
+    /// `offline = true` left in a config file by an older build is an
+    /// unknown key to serde's derive, silently ignored on load and dropped
+    /// by the next `save()` — self-healing, no migration needed.
+    #[serde(skip)]
+    pub offline: bool,
     /// Downlink lists, keyed by NORAD id — the in-memory half of the
     /// `transmitters-<norad>.json` cache entries `load_downlinks` hydrates
     /// this from and `set_transmitters` writes through to. Kept separate from
@@ -659,6 +665,27 @@ mod tests {
         c.track(25544, "ISS (ZARYA)");
         assert_eq!(c.active_transmitter(25544).map(|t| t.downlink_hz), Some(437_800_000));
         assert_eq!(c.tracked[0].name, "ISS (ZARYA)");
+    }
+
+    /// `--offline` is a per-launch flag like `--no-splash`, never a setting:
+    /// a session started with it must not pin every later launch to it with
+    /// no `--online` to undo it.
+    #[test]
+    fn the_offline_flag_is_never_written_to_the_config_file() {
+        let mut c = Config::default();
+        c.offline = true;
+        let text = toml::to_string_pretty(&c).unwrap();
+        assert!(!text.contains("offline"), "offline must not round-trip through config.toml:\n{text}");
+    }
+
+    /// An `offline = true` left behind by an older build that did persist it
+    /// is just an unknown key to serde's derive — ignored on load, and
+    /// dropped from the file by the very next `save()`. Self-healing, no
+    /// migration needed.
+    #[test]
+    fn an_offline_key_left_in_an_older_config_file_is_ignored() {
+        let c: Config = toml::from_str("offline = true\n").unwrap();
+        assert!(!c.offline, "offline must only ever come from --offline, never from the file");
     }
 
     /// A cache rooted at a fresh temp directory, for tests that need to drive

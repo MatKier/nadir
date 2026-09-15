@@ -59,7 +59,7 @@ fn main() -> Result<()> {
 
     let mut config = Config::load(cli.config.as_deref()).context("loading configuration")?;
     config.apply_overrides(cli.lat, cli.lon, cli.alt, cli.sat, cli.location);
-    config.offline = config.offline || cli.offline;
+    config.offline = cli.offline;
     config.allow_geoip = config.allow_geoip && !cli.no_geoip;
 
     let runtime = tokio::runtime::Builder::new_multi_thread()

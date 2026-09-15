@@ -248,6 +248,12 @@ pub struct App {
     /// permanently complete, so there's nothing to gain from clearing it and
     /// somewhere for the last switch's identity to be lost if it were.
     pub acquired: Option<(u64, Instant)>,
+    /// The disk cache `run` opened for the whole session — kept here so
+    /// `switch_satellite` can warm-start the new satellite's element set from
+    /// it directly, the same `Feed::recover` call `load_all_from_cache` makes
+    /// at launch, instead of waiting on `tle_task` (which never runs at all
+    /// under `--offline`) to backfill it.
+    cache: Cache,
     sat_tx: watch::Sender<u64>,
     /// Submits a catalogue search query to the search task; a no-op send
     /// (nothing listening) in `--offline` mode, where submission is handled
@@ -716,8 +722,18 @@ impl App {
     }
 
     /// Force just the focused panel's data source(s) to refetch now, instead
-    /// of waiting out their interval.
+    /// of waiting out their interval. Offline, no fetch task was ever spawned
+    /// (`run` skips `spawn_fetch_tasks` entirely) — every arm below sends
+    /// into a channel nothing reads or notifies a `Notify` nothing awaits, so
+    /// rather than log a refresh that will never happen, say plainly that
+    /// there's nothing to refresh.
     fn refresh_focused(&mut self) {
+        if self.config.offline {
+            if let Ok(mut d) = self.data.write() {
+                d.note("offline — nothing to refresh, showing cached data only");
+            }
+            return;
+        }
         let refreshed = match self.focus {
             Panel::Map | Panel::Tracked | Panel::Telemetry | Panel::Passes => {
                 let _ = self.sat_tx.send(self.config.sat);
@@ -776,6 +792,25 @@ impl App {
             self.passes.clear();
             self.passes_at = None;
             self.passes_from = None;
+
+            // Warm-start the new satellite's element set from disk before
+            // handing off to `tle_task` — the same `Feed::recover` call
+            // `load_all_from_cache` makes at launch. Online this only saves
+            // a frame or two of "acquiring…" before the task's own recovery
+            // would have caught up; offline, `tle_task` was never spawned at
+            // all (`run` skips `spawn_fetch_tasks` entirely), so without
+            // this the map, passes and telemetry would sit on a blank
+            // `Source::default()` for the rest of the session with nothing
+            // left to ever refill it.
+            Feed::<Tracker>::tle(norad_id).recover(&self.cache, &self.data);
+            if self.config.offline && self.data.read().ok().is_some_and(|d| d.tle.get().is_none()) {
+                if let Ok(mut d) = self.data.write() {
+                    d.tle.set_failed("no cached element set for this satellite — offline, can't fetch one");
+                    d.note(format!(
+                        "NORAD {norad_id}: no cached element set, and --offline can't fetch one"
+                    ));
+                }
+            }
             let _ = self.sat_tx.send(norad_id);
 
             // First time this object has been tracked this session and it has
@@ -1080,9 +1115,12 @@ impl App {
 }
 
 /// Entry point from `main`. Owns the terminal for the duration of the
-/// session. `skip_splash` is `--no-splash` — kept as its own parameter
-/// rather than a `Config` field since it's a per-launch display preference,
-/// not a setting worth persisting to `config.toml` the way `offline` is.
+/// session. `skip_splash` is `--no-splash` — kept as its own parameter rather
+/// than a `Config` field since it's a per-launch display preference, not a
+/// setting worth persisting to `config.toml`; `config.offline` is the same
+/// kind of per-launch flag (see its own doc comment), just carried on
+/// `Config` instead because `App` and its background tasks need it in more
+/// places than a second parameter would reach cleanly.
 pub async fn run(mut config: Config, skip_splash: bool) -> Result<()> {
     let cache = Cache::open().context("opening the disk cache")?;
     config.load_downlinks(&cache);
@@ -1241,6 +1279,7 @@ pub async fn run(mut config: Config, skip_splash: bool) -> Result<()> {
         passes_from: None,
         last_aos_seen: None,
         acquired: None,
+        cache: cache.clone(),
         sat_tx,
         search_tx,
         tx_lookup_tx,
@@ -1854,6 +1893,13 @@ mod tests {
         App {
             config,
             data: Arc::new(RwLock::new(AppData::default())),
+            // A path nothing ever creates: `Cache::get`/`age` just read as
+            // absent, so every test not specifically exercising cache
+            // recovery stays hermetic. A test that needs real recovery
+            // (`switch_satellite`'s warm start) overwrites this field
+            // directly with a `Cache::in_dir` scratch directory it wrote to
+            // first — the same `temp_cache()` idiom `config.rs` uses.
+            cache: Cache::in_dir(std::env::temp_dir().join("nadir-app-test-unused-cache")),
             focus: Panel::Tracked,
             map_fullscreen: false,
             follow: false,
@@ -2043,6 +2089,79 @@ mod tests {
         assert!(app.data.read().unwrap().tle.get().is_none(), "the old tracker must be cleared");
         assert!(app.passes.is_empty());
         assert_eq!(app.config.tracked[0].norad_id, 20580);
+    }
+
+    /// A scratch cache directory `switch_satellite`'s warm start can read
+    /// from — the same `temp_cache()` idiom `config.rs` uses for its own
+    /// disk-backed tests, duplicated here since it's `config.rs`-private.
+    fn temp_cache() -> (Cache, std::path::PathBuf) {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static COUNTER: AtomicU64 = AtomicU64::new(0);
+        let n = COUNTER.fetch_add(1, Ordering::Relaxed);
+        let dir = std::env::temp_dir().join(format!("nadir-app-test-{}-{n}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        (Cache::in_dir(dir.clone()), dir)
+    }
+
+    #[test]
+    fn switching_satellites_offline_warm_starts_the_new_element_set_from_cache() {
+        let (cache, dir) = temp_cache();
+        cache.put("tle-25544", crate::orbit::ISS_GP_JSON.as_bytes()).unwrap();
+
+        let mut config = Config::default();
+        config.offline = true;
+        config.sat = 20580; // tracking something else; 25544 has no live data yet
+        let mut app = test_app(config);
+        app.cache = cache;
+
+        app.switch_satellite(25544, Some("ISS (ZARYA)".to_string()));
+
+        assert!(
+            app.data.read().unwrap().tle.get().is_some(),
+            "the cached element set must be recovered on switch, not left for a tle_task that \
+             --offline never spawns"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn switching_offline_to_a_satellite_with_nothing_cached_reports_it_rather_than_going_blank() {
+        let (cache, dir) = temp_cache(); // empty: no tle-48274 entry on disk
+
+        let mut config = Config::default();
+        config.offline = true;
+        config.sat = 25544;
+        let mut app = test_app(config);
+        app.cache = cache;
+
+        app.switch_satellite(48274, Some("STARLINK".to_string()));
+
+        let health = app.data.read().unwrap().tle.health();
+        assert!(
+            matches!(health, crate::source::Health::Error(_)),
+            "expected Error so the TLE chip reads red instead of sitting on Pending/wait \
+             forever, got {health:?}"
+        );
+        assert!(
+            app.data.read().unwrap().log.iter().any(|l| l.contains("no cached element set")),
+            "the activity log should say why, not just that a switch happened"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn refreshing_offline_says_so_instead_of_claiming_a_fetch() {
+        let mut config = Config::default();
+        config.offline = true;
+        let mut app = test_app(config);
+        app.focus = Panel::Map;
+
+        app.refresh_focused();
+
+        assert!(
+            app.data.read().unwrap().log.iter().any(|l| l.contains("nothing to refresh")),
+            "offline, `r` must not log a refresh that spawn_fetch_tasks never runs"
+        );
     }
 
     #[test]

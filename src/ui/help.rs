@@ -376,6 +376,10 @@ fn content(app: &App) -> Vec<Line<'static>> {
     text(&mut l, "--offline makes zero network requests and loads the last cached");
     text(&mut l, "TLE, weather and launches, each labelled with its age. A");
     text(&mut l, "normal run warm-starts from that same cache while it fetches.");
+    text(&mut l, "Switching satellites offline warm-starts the same way: the new");
+    text(&mut l, "object's own cached element set comes with it, so the map keeps");
+    text(&mut l, "drawing instead of going blank. Nothing cached for it says so in");
+    text(&mut l, "the activity log, rather than sitting on \"acquiring…\" forever.");
     blank(&mut l);
 
     heading(&mut l, "Recent activity");

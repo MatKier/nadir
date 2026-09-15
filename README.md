@@ -58,8 +58,11 @@ cached. The map keeps tracking from the last cached TLE. What needs the network
 and so is unavailable offline: the catalogue name search, the SatNOGS downlink
 lookup, `--location`, and a `--sat` name (both of the latter are ignored with a
 warning). A NORAD id still switches satellites, since nothing has to be looked
-up first, and an already-cached downlink still drives `DOPP` — the Doppler
-shift itself is local math.
+up first — and its own cached element set comes with it, the same warm start
+launch gets, so the map keeps drawing a track instead of going blank; a
+satellite with nothing on file for it says so in the activity log rather than
+sitting on "acquiring…" forever. An already-cached downlink still drives
+`DOPP` — the Doppler shift itself is local math.
 
 ## Installing
 
