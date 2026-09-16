@@ -312,23 +312,22 @@ impl App {
     }
 
     /// Whether something on screen is moving on its own right now — the
-    /// aurora shimmer, the sky plot's star twinkle, the boot splash's rows
-    /// filling in — and so the render loop should step up from `FRAME_LIVE`
-    /// to `FRAME_ANIM` (see `frame_interval`). Deliberately narrow: each
-    /// clause names one visual that actually animates, rather than a
-    /// blanket "is anything interesting focused", so an idle dashboard
-    /// stays at 4 fps.
+    /// aurora shimmer, the sky plot's star twinkle, the AOS border pulse, an
+    /// acquisition sweep still in flight — and so the render loop should
+    /// step up from `FRAME_LIVE` to `FRAME_ANIM` (see `frame_interval`).
+    /// Deliberately narrow: each clause names one visual that actually
+    /// animates, rather than a blanket "is anything interesting focused", so
+    /// an idle dashboard stays at 4 fps. The boot splash is *not* a clause
+    /// here even though its backdrop animates the whole time it's up:
+    /// `frame_interval` takes `App::splash_active()` as its own separate
+    /// parameter and its match arm always wins over this one, so a
+    /// `splash_active()` clause here would be evaluated (paying a `RwLock`
+    /// read and a pass scan) and then provably never change the result.
     fn is_animating(&self) -> bool {
         let now = self.sim_now();
         let aurora_shimmering = ui::aurora_visible(self.aurora_overlay, self.clock.state())
             && self.data.read().ok().is_some_and(|d| d.aurora.get().is_some());
         let sky_plot_twinkling = ui::selected_pass(self, now).is_some();
-        // The rows' own reveal (`ui::splash_reveal_count`) still only runs
-        // across the first third of `config.ui.splash`, but the splash's
-        // backdrop — its starfield and the satellite transiting the frame —
-        // now runs for the whole thing, so this is just `splash_active()`
-        // rather than that one-third cutoff.
-        let splash_playing = self.splash_active();
         // Matches `ui::panels::passes`'s own gate on the AOS border pulse: a
         // warp or a pause leaves the clock as static on screen as it always
         // was, and the pulse's phase means nothing against a clock that
@@ -344,7 +343,7 @@ impl App {
         // left moving, so this can't be the blanket "is a satellite tracked"
         // the other clauses are careful to avoid being either.
         let acquiring = self.acquired.is_some_and(|(_, at)| at.elapsed() < ui::ACQUIRE_REVEAL);
-        aurora_shimmering || sky_plot_twinkling || aos_pulsing || splash_playing || acquiring
+        aurora_shimmering || sky_plot_twinkling || aos_pulsing || acquiring
     }
 
     /// Switch focus to `panel`, resetting list scroll — a scroll position
@@ -2041,24 +2040,25 @@ mod tests {
 
     /// The splash's own backdrop — the starfield and the transiting
     /// satellite — runs for the whole of `config.ui.splash`, not just the
-    /// first third the row reveal gets, so `is_animating` has to track
-    /// `splash_active`'s full-duration window rather than cutting off early.
+    /// first third the row reveal gets, so `frame_interval`'s `splash`
+    /// parameter (fed by `splash_active`, not by `is_animating` — see that
+    /// function's doc) has to track the full-duration window rather than
+    /// cutting off early.
     #[test]
-    fn is_animating_holds_for_the_whole_boot_splash() {
+    fn splash_active_holds_for_the_whole_splash_not_just_the_row_reveal() {
         let mut app = test_app(Config::default());
         app.splash_skipped = false;
         app.started = Instant::now();
-        assert!(app.is_animating(), "the splash should animate right away");
+        assert!(app.splash_active(), "the splash should be active right away");
 
         app.started = Instant::now() - app.config.ui.splash / 3;
         assert!(
-            app.is_animating(),
+            app.splash_active(),
             "the backdrop keeps moving through the two-thirds the row reveal holds static"
         );
-        assert!(app.splash_active(), "fixture assumption: still within the splash duration");
 
         app.started = Instant::now() - app.config.ui.splash - Duration::from_millis(1);
-        assert!(!app.is_animating(), "once the splash itself has ended there is nothing left to animate");
+        assert!(!app.splash_active(), "once the splash itself has ended there is nothing left to animate");
     }
 
     #[test]
@@ -2773,7 +2773,7 @@ mod tests {
     }
 
     #[test]
-    fn frame_interval_only_speeds_up_for_a_warp_or_an_animation() {
+    fn frame_interval_only_speeds_up_for_a_warp_an_animation_or_the_splash() {
         // The dashboard is a 4 fps clock face unless the clock is winding
         // itself forward — only a warp does that. A drift or a pause is as
         // static on screen as being live, absent anything else animating.
@@ -2805,6 +2805,14 @@ mod tests {
         // A warp still wins if somehow both are true at once — there is
         // nothing left to speed the splash up further.
         assert_eq!(frame_interval(ClockState::Warp(2), false, true), FRAME_WARP);
+        // `(Live, true, true)` is not a hypothetical: `is_animating` (an
+        // aurora shimmer, an acquisition sweep) can easily be true at the
+        // same moment `splash_active()` is, since a splash covers the first
+        // few seconds of every session. If the `_ if splash` and `_ if
+        // animating` arms were ever swapped, this is the case that would
+        // silently drop a real splash from FRAME_WARP to FRAME_ANIM while
+        // every other case in this test suite stayed green.
+        assert_eq!(frame_interval(ClockState::Live, true, true), FRAME_WARP);
     }
 
     #[test]

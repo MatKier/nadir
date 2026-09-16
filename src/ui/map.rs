@@ -719,7 +719,10 @@ struct MarkerLabel<'a> {
 /// `ctx.print` call per line — nothing gets drawn over the glyph — and it
 /// isn't clipped by an edge the way a label fixed to one side would be. The
 /// placement is decided by [`label_layout`], which [`marker_cells`] reuses so
-/// the place layer can reserve exactly the cells this draws into.
+/// the place layer can reserve exactly the cells this draws into. `ctx.print`
+/// is a ratatui label, not a canvas shape, so it's always rendered after
+/// every `ctx.draw`/`ctx.layer` layer beneath it regardless of call order —
+/// `skyplot::draw_stars` relies on that same rule for its own star names.
 fn print_marker(ctx: &mut Context<'_>, grid: &Grid, lon: f64, lat: f64, marker: &MarkerLabel<'_>) {
     // `None` when the marker isn't in this pane's window — leave it to the
     // pane that does hold it. This also fixes a pre-existing glitch: a pad

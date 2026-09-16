@@ -109,10 +109,10 @@ and `--no-splash` skips it every time. The box itself is sized for the full
 splash from the very first frame, so filling the rows in doesn't resize or
 re-centre it — only their content appears over time. Behind it, a procedural
 starfield rings the console and a satellite transits the whole frame once,
-comet tail behind it, over the whole splash duration — passing behind the
-console block the way the real dashboard's own map draws a track behind its
-satellite — while the wordmark itself ignites left to right on power-up. The
-duration is configurable — see [Presentation timings](#presentation-timings).
+comet tail behind it, over the whole splash duration — arcing clear of the
+console block rather than crossing it — while the wordmark itself ignites
+left to right on power-up. The duration is configurable — see
+[Presentation timings](#presentation-timings).
 
 `--location` is resolved once at startup via Open-Meteo's geocoding API and the
 result saved like a geolocated or hand-typed one. An ambiguous name takes the

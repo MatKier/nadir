@@ -1,6 +1,6 @@
 [package]
 name = "nadir"
-version = "1.0.0"
+version = "1.0.1"
 edition = "2021"
 rust-version = "1.88"
 description = "A terminal application that tracks a satellite overhead in real time — world map, telemetry, passes, space weather and launches. Real SGP4, computed locally."

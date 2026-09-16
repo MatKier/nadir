@@ -1,18 +1,22 @@
 //! The mission-control boot splash, shown on launch for `config.ui.splash`
 //! (`App::splash_active`) before `ui::draw` hands off to the dashboard.
 //!
-//! Two layers, painted in this order so the console block occludes whatever
-//! sits behind it — which is what sells the satellite as *passing behind*
-//! the readout rather than just sharing the screen with it:
+//! Two layers, painted in this order:
 //!
 //!  1. A full-area `Canvas` — a procedural starfield, and an orbital transit
 //!     (a satellite riding an arc across the frame with a fading trail
 //!     behind it) — the same `Marker::Braille` / one-`layer`-per-feature
-//!     discipline `ui::map` and `ui::skyplot` use.
+//!     discipline `ui::map` and `ui::skyplot` use. The transit arc stays
+//!     clear of the console readout (see `transit_row`); it shares the
+//!     screen with it rather than passing behind it.
 //!  2. The console text itself: the wordmark (igniting left-to-right on
 //!     power-up), version line, and the `label ....... value` rows that
 //!     still reveal over the first third of the splash, unchanged from
-//!     before this module existed.
+//!     before this module existed. `Paragraph` writes only the cells its
+//!     glyphs occupy, so the canvas shows through every blank one — which is
+//!     why `starfield`'s keep-out rect, not paint order, is what keeps a
+//!     star from appearing to poke through inside the readout rather than
+//!     around it (see `draw`).
 //!
 //! Everything here is a pure function of `(area, phase, progress)`, `phase`
 //! being `App::uptime()` and `progress` being `phase / config.ui.splash` —
@@ -24,7 +28,7 @@
 
 use std::time::Duration;
 
-use ratatui::layout::Rect;
+use ratatui::layout::{Position, Rect};
 use ratatui::style::{Color, Style};
 use ratatui::symbols::Marker;
 use ratatui::text::{Line, Span};
@@ -51,7 +55,7 @@ const NADIR_WORDMARK: [&str; 3] = [
 /// The release codename shown next to the version on the boot splash. Bump
 /// it alongside the version in `Cargo.toml` on a release, the same way a
 /// changelog heading would.
-const RELEASE_NAME: &str = "Apogee";
+const RELEASE_NAME: &str = "Station-Keeping";
 
 /// How wide the splash's dotted leader column is, `label` padded up to it —
 /// wide enough for "ground station" (14 chars, the longest of
@@ -143,8 +147,17 @@ fn ignition_brightness(col: usize, cols: usize, progress: f32) -> f32 {
 
 /// One wordmark row, each character lit [`Theme::SAT`] bold, still dark
 /// [`Theme::FRAME`], or blended between the two right at the sweep's edge —
-/// see [`ignition_brightness`].
+/// see [`ignition_brightness`]. Past [`IGNITION_FRACTION`] every column is
+/// lit (solving `ignition_brightness(cols - 1, cols, progress) >= 1.0` for
+/// `progress` gives exactly `progress >= IGNITION_FRACTION`, for every
+/// `cols`, since the sweep is non-increasing left to right) — a fast path
+/// for that whole back 80% of the splash returns one `Span` for the row
+/// instead of one per character, since `boot_text` rebuilds every wordmark
+/// row from scratch each frame.
 fn ignite_wordmark_row(row: &str, progress: f32) -> Line<'static> {
+    if progress >= IGNITION_FRACTION {
+        return Line::from(Span::styled(row.to_string(), Style::new().fg(Theme::SAT).bold()));
+    }
     let cols = row.chars().count();
     let spans = row
         .chars()
@@ -198,6 +211,32 @@ fn boot_text(lines: &[(&'static str, String)], revealed: usize, progress: f32) -
     text
 }
 
+/// The `(width, height)` [`draw`] centres its box on — the same size a fully
+/// revealed, fully lit `boot_text(&lines, lines.len(), 1.0)` would measure,
+/// computed from the raw string pieces instead of building that styled
+/// `Vec<Line>` just to throw it away: `draw` used to build it twice a frame
+/// (once only to measure), each build allocating roughly a hundred `String`s
+/// via `ignite_wordmark_row`'s per-character spans and this function's own
+/// `format!`/`.repeat` calls, at the splash's 25 fps.
+fn boot_box_size(lines: &[(&'static str, String)]) -> (u16, u16) {
+    let wordmark_width = NADIR_WORDMARK.iter().map(|row| row.chars().count()).max().unwrap_or(0);
+    let version_width =
+        format!("           v{} · \"{RELEASE_NAME}\"", env!("CARGO_PKG_VERSION")).chars().count();
+    let footer_width = "  any key to continue".chars().count();
+    let row_width = lines
+        .iter()
+        .map(|(label, value)| {
+            let dots = BOOT_LEADER_WIDTH.saturating_sub(label.chars().count());
+            // Mirrors `boot_text`'s row exactly: "  {label} " + dots + " {value}".
+            label.chars().count() + 3 + dots + 1 + value.chars().count()
+        })
+        .max()
+        .unwrap_or(0);
+    let width = wordmark_width.max(version_width).max(footer_width).max(row_width) as u16;
+    let height = (NADIR_WORDMARK.len() + 2 + lines.len() + 2) as u16;
+    (width, height)
+}
+
 /// How many procedural background stars the splash scatters, scaled to the
 /// terminal area — one star per roughly 50 cells, clamped so neither a
 /// crowded 80×24 minimum nor a huge fullscreen terminal looks wrong.
@@ -211,12 +250,13 @@ fn star_count(area: Rect) -> usize {
 /// of `Points` layers rather than one draw call per star.
 const STARFIELD_TIERS: usize = 3;
 
-/// Noise/hash lanes for the starfield — position, twinkle and fade-in each
+/// Noise/hash lanes for the starfield — column, row, twinkle and fade-in each
 /// get their own so one star's roll on one axis can't accidentally repeat
 /// another's roll on a different axis.
-const STAR_POS_SEED: u32 = 0x5741;
+const STAR_COL_SEED: u32 = 0x5741;
 const STAR_TWINKLE_SEED: u32 = 0x5742;
 const STAR_FADE_SEED: u32 = 0x5743;
+const STAR_ROW_SEED: u32 = 0x5744;
 
 /// How much of the splash's total duration the starfield spends fading stars
 /// in, one at a time, rather than snapping on at frame one — the same third
@@ -236,16 +276,20 @@ fn starfield(area: Rect, box_rect: Rect, phase: f32, progress: f32) -> Vec<(usiz
     if area.width == 0 || area.height == 0 {
         return Vec::new();
     }
-    let margin = box_margin(box_rect, area);
+    // `starfield` walks cells in `0..area.width`/`0..area.height`, so
+    // `box_rect` (absolute screen coordinates) and `area` itself both need
+    // translating into that same relative space before comparing against it.
+    let frame = Rect { x: 0, y: 0, width: area.width, height: area.height };
+    let margin = box_margin(relative_to(box_rect, area), frame);
     let n = star_count(area);
     (0..n)
         .filter_map(|i| {
             let idx = i as u32;
-            let col = (hash01(STAR_POS_SEED, idx) * f32::from(area.width)) as u16;
-            let row = (hash01(STAR_POS_SEED.wrapping_add(1), idx) * f32::from(area.height)) as u16;
+            let col = (hash01(STAR_COL_SEED, idx) * f32::from(area.width)) as u16;
+            let row = (hash01(STAR_ROW_SEED, idx) * f32::from(area.height)) as u16;
             let col = col.min(area.width - 1);
             let row = row.min(area.height - 1);
-            if in_rect(col, row, margin) {
+            if margin.contains(Position::new(col, row)) {
                 return None;
             }
             if progress < hash01(STAR_FADE_SEED, idx) * STAR_FADE_IN_FRACTION {
@@ -258,18 +302,33 @@ fn starfield(area: Rect, box_rect: Rect, phase: f32, progress: f32) -> Vec<(usiz
         .collect()
 }
 
+/// `rect` translated into `area`-relative space — `centered` (and everything
+/// built from it, like `box_rect`) returns absolute screen coordinates
+/// including `area.x`/`area.y`, but the starfield and the transit arc both
+/// work in `0..area.width`/`0..area.height` to match the `Canvas`'s own
+/// `x_bounds`/`y_bounds`. Saturating because a `rect` that starts left of or
+/// above `area` (not something `box_rect` does today, but not this
+/// function's job to assume) would otherwise underflow.
+fn relative_to(rect: Rect, area: Rect) -> Rect {
+    Rect {
+        x: rect.x.saturating_sub(area.x),
+        y: rect.y.saturating_sub(area.y),
+        width: rect.width,
+        height: rect.height,
+    }
+}
+
 /// `box_rect` grown by one cell in every direction (clamped to `area`), so
 /// the starfield rings the console block rather than touching its edge.
+/// Saturating throughout — `box_rect` sits well inside `area` for every
+/// terminal size the splash supports today, but nothing here should assume
+/// that at the top end either.
 fn box_margin(box_rect: Rect, area: Rect) -> Rect {
     let x = box_rect.x.saturating_sub(1).max(area.x);
     let y = box_rect.y.saturating_sub(1).max(area.y);
-    let x2 = (box_rect.x + box_rect.width + 1).min(area.x + area.width);
-    let y2 = (box_rect.y + box_rect.height + 1).min(area.y + area.height);
+    let x2 = box_rect.x.saturating_add(box_rect.width).saturating_add(1).min(area.x + area.width);
+    let y2 = box_rect.y.saturating_add(box_rect.height).saturating_add(1).min(area.y + area.height);
     Rect { x, y, width: x2.saturating_sub(x), height: y2.saturating_sub(y) }
-}
-
-fn in_rect(col: u16, row: u16, rect: Rect) -> bool {
-    col >= rect.x && col < rect.x + rect.width && row >= rect.y && row < rect.y + rect.height
 }
 
 /// How far the transit's background arc extends past each visible edge, as
@@ -310,12 +369,19 @@ fn point_at(area: Rect, box_top: f32, t: f32) -> (f32, f64, f64) {
 /// past the left edge to just past the right, with the satellite's own exact
 /// position at `progress` spliced in — so the flown and still-ahead halves
 /// [`draw`] slices out of this meet precisely where the satellite is, rather
-/// than at whichever fixed sample happens to be closest.
-fn transit_track(area: Rect, box_rect: Rect, progress: f32) -> Vec<(f32, f64, f64)> {
+/// than at whichever fixed sample happens to be closest. The second element
+/// is the spliced point's own index, returned rather than left for the
+/// caller to re-derive: the spliced point has `t == progress` exactly, which
+/// fails `partition_point`'s strict `<` the same way here as it would for a
+/// caller redoing the search, so the two would only ever agree by an
+/// unstated invariant if this weren't the one place that does the search.
+fn transit_track(area: Rect, box_rect: Rect, progress: f32) -> (Vec<(f32, f64, f64)>, usize) {
     if area.width == 0 || area.height == 0 {
-        return Vec::new();
+        return (Vec::new(), 0);
     }
-    let box_top = f32::from(box_rect.y);
+    // `transit_row`'s "row 0 = top of area" is area-relative, but `box_rect`
+    // is in absolute screen coordinates — see `relative_to`.
+    let box_top = f32::from(relative_to(box_rect, area).y);
     let mut track: Vec<(f32, f64, f64)> = (0..TRANSIT_SAMPLES)
         .map(|i| {
             let t = -TRANSIT_OVERHANG
@@ -327,22 +393,16 @@ fn transit_track(area: Rect, box_rect: Rect, progress: f32) -> Vec<(f32, f64, f6
     let here = point_at(area, box_top, progress);
     let insert_at = track.partition_point(|(t, _, _)| *t < progress);
     track.insert(insert_at, here);
-    track
+    (track, insert_at)
 }
 
-/// A flat-colour polyline through consecutive `points` — the arc's
-/// not-yet-flown remainder, dim and uniform since nothing has happened there
-/// yet.
-fn draw_track(ctx: &mut Context<'_>, points: &[(f32, f64, f64)], color: Color) {
-    for w in points.windows(2) {
-        ctx.draw(&CanvasLine { x1: w[0].1, y1: w[0].2, x2: w[1].1, y2: w[1].2, color });
-    }
-}
-
-/// Like [`draw_track`], but fading from `old` at the earliest point to `new`
-/// at the most recent — a comet tail behind the satellite, the same shape
-/// `ui::map`'s `draw_fading_polyline` draws behind the ground track, just
-/// over plain `(t, x, y)` points instead of a `GeoPoint` track.
+/// Like a flat-colour polyline through consecutive `points`, but fading from
+/// `old` at the earliest point to `new` at the most recent — a comet tail
+/// behind the satellite, the same shape `ui::map`'s `draw_fading_polyline`
+/// draws behind the ground track, just over plain `(t, x, y)` points instead
+/// of a `GeoPoint` track. `old == new` degenerates to a flat-colour line,
+/// which is what the arc's not-yet-flown remainder uses this for: nothing
+/// has happened there yet, so there's nothing to fade.
 fn draw_fading_track(ctx: &mut Context<'_>, points: &[(f32, f64, f64)], old: Color, new: Color) {
     let total_lines = points.len().saturating_sub(1);
     if total_lines == 0 {
@@ -358,36 +418,44 @@ fn draw_fading_track(ctx: &mut Context<'_>, points: &[(f32, f64, f64)], old: Col
 }
 
 /// Paint the Canvas backdrop: starfield, then the transit's not-yet-flown
-/// path, then its fading trail, then the satellite itself — last, so it wins
-/// any cell it shares with the path beneath it, the same reasoning
-/// `skyplot::paint` gives for drawing its own live marker last.
+/// path, then its fading trail, then the satellite itself. The marker is a
+/// `ctx.print` label rather than a canvas shape, and ratatui always renders
+/// labels after every canvas layer regardless of call order — the same rule
+/// `skyplot::draw_stars` relies on for its own star names — so draw order
+/// here is for the two arc layers only; the marker wins its cell no matter
+/// where in this function it's called.
 fn paint(ctx: &mut Context<'_>, area: Rect, box_rect: Rect, phase: f32, progress: f32) {
     let stars = starfield(area, box_rect, phase, progress);
+    let mut tiers: [Vec<(f64, f64)>; STARFIELD_TIERS] = std::array::from_fn(|_| Vec::new());
+    for (tier, col, row) in stars {
+        tiers[tier].push((f64::from(col) + 0.5, f64::from(area.height) - f64::from(row) - 0.5));
+    }
     let mut any_star = false;
-    for tier in 0..STARFIELD_TIERS {
-        let points: Vec<(f64, f64)> = stars
-            .iter()
-            .filter(|(t, _, _)| *t == tier)
-            .map(|(_, col, row)| (f64::from(*col) + 0.5, f64::from(area.height) - f64::from(*row) - 0.5))
-            .collect();
+    for (tier, points) in tiers.iter().enumerate() {
         if points.is_empty() {
             continue;
         }
         let t = tier as f32 / (STARFIELD_TIERS - 1) as f32;
-        ctx.draw(&Points { coords: &points, color: lerp(Theme::PLACE, Theme::VALUE, t) });
+        ctx.draw(&Points { coords: points, color: lerp(Theme::PLACE, Theme::VALUE, t) });
         any_star = true;
     }
     if any_star {
         ctx.layer();
     }
 
-    let track = transit_track(area, box_rect, progress);
-    let idx = track.partition_point(|(t, _, _)| *t < progress.clamp(0.0, 1.0));
+    let (track, idx) = transit_track(area, box_rect, progress);
+    // Unreachable today: `Canvas` early-returns on an empty area before ever
+    // calling `paint`. Guarded explicitly anyway, since `idx.min(len - 1)`
+    // below looks like an empty-case guard but isn't — `..=0` still needs at
+    // least one element.
+    if track.is_empty() {
+        return;
+    }
     let ahead = &track[idx..];
-    let flown = &track[..=idx.min(track.len().saturating_sub(1))];
+    let flown = &track[..=idx.min(track.len() - 1)];
 
     if ahead.len() > 1 {
-        draw_track(ctx, ahead, Theme::FRAME);
+        draw_fading_track(ctx, ahead, Theme::FRAME, Theme::FRAME);
         ctx.layer();
     }
     if flown.len() > 1 {
@@ -404,22 +472,24 @@ fn paint(ctx: &mut Context<'_>, area: Rect, box_rect: Rect, phase: f32, progress
 /// the cells its glyphs occupy, so the backdrop shows through every blank
 /// one, and [`starfield`]'s box-margin exclusion is what keeps that from
 /// reading as stars poking through *inside* the panel rather than around it.
-/// The box is sized from the *fully revealed, fully lit* text
-/// (`boot_text(&lines, lines.len(), 1.0)`), not from what's actually drawn
-/// this frame — so it's always its final size, even on the very first frame,
-/// and never resizes or re-centres as the rows fill in or the wordmark
-/// ignites.
+/// The box is sized by [`boot_box_size`] from the *fully revealed, fully lit*
+/// text, not from what's actually drawn this frame — so it's always its
+/// final size, even on the very first frame, and never resizes or re-centres
+/// as the rows fill in or the wordmark ignites.
 pub fn draw(frame: &mut Frame, area: Rect, app: &App, data: &AppData) {
     let lines = boot_lines(app.config.ground_station(), data.tle.get(), app.config.sat, app.config.offline);
-    let revealed = splash_reveal_count(app.uptime(), app.config.ui.splash, lines.len());
-    let splash = app.config.ui.splash;
+    // Read once: `uptime` is a fresh `Instant::now().elapsed()` each call, so
+    // a second read below would be strictly later than this one and could
+    // straddle the `splash / 3` reveal boundary inconsistently between the
+    // two — contradicting this module's "pure function of `(area, phase,
+    // progress)`" claim for a single frame.
     let uptime = app.uptime();
+    let revealed = splash_reveal_count(uptime, app.config.ui.splash, lines.len());
+    let splash = app.config.ui.splash;
     let progress =
         if splash.is_zero() { 1.0 } else { (uptime.as_secs_f32() / splash.as_secs_f32()).clamp(0.0, 1.0) };
 
-    let full = boot_text(&lines, lines.len(), 1.0);
-    let height = full.len() as u16;
-    let width = full.iter().map(Line::width).max().unwrap_or(0) as u16;
+    let (width, height) = boot_box_size(&lines);
     let box_rect = centered(area, width, height);
 
     // Wall time since the session started, not `app.sim_now()` — scenery
@@ -441,6 +511,7 @@ pub fn draw(frame: &mut Frame, area: Rect, app: &App, data: &AppData) {
 mod tests {
     use super::*;
     use crate::geo::GeoPoint;
+    use ratatui::style::Modifier;
 
     #[test]
     fn boot_lines_reads_pending_data_honestly_rather_than_faking_it() {
@@ -599,6 +670,10 @@ mod tests {
             let line = ignite_wordmark_row(row, 1.0);
             for span in &line.spans {
                 assert_eq!(span.style.fg, Some(Theme::SAT), "expected every column lit at progress 1.0");
+                assert!(
+                    span.style.add_modifier.contains(Modifier::BOLD),
+                    "expected every column bold at progress 1.0"
+                );
             }
         }
     }
@@ -609,20 +684,100 @@ mod tests {
             let line = ignite_wordmark_row(row, 0.0);
             for span in &line.spans {
                 assert_eq!(span.style.fg, Some(Theme::FRAME));
+                assert!(
+                    !span.style.add_modifier.contains(Modifier::BOLD),
+                    "a still-dark column should not be bold"
+                );
             }
         }
     }
 
+    /// Pins the fast path added for `progress >= IGNITION_FRACTION`: it must
+    /// render identically — same text, same style — to what the
+    /// per-character construction it replaces would still produce there,
+    /// built inline here rather than via `ignite_wordmark_row` (which always
+    /// takes the fast path at this threshold).
+    #[test]
+    fn the_wordmark_fast_path_matches_the_per_character_path_once_fully_lit() {
+        for row in NADIR_WORDMARK {
+            for progress in [IGNITION_FRACTION, IGNITION_FRACTION + 0.3, 1.0] {
+                let fast = ignite_wordmark_row(row, progress);
+                let cols = row.chars().count();
+                let slow_spans: Vec<Span> = row
+                    .chars()
+                    .enumerate()
+                    .map(|(i, ch)| {
+                        assert!(
+                            ignition_brightness(i, cols, progress) >= 1.0,
+                            "column {i} not fully lit at progress {progress}"
+                        );
+                        Span::styled(ch.to_string(), Style::new().fg(Theme::SAT).bold())
+                    })
+                    .collect();
+                assert_eq!(fast.spans.len(), 1, "fast path should emit one span for the whole row");
+                let fast_text: String = fast.spans.iter().map(|s| s.content.as_ref()).collect();
+                let slow_text: String = slow_spans.iter().map(|s| s.content.as_ref()).collect();
+                assert_eq!(fast_text, slow_text);
+                assert_eq!(fast.spans[0].style, slow_spans[0].style);
+            }
+        }
+    }
+
+    /// Pins `box_margin`'s own growth arithmetic directly, decoupled from
+    /// `starfield` (which calls `box_margin` itself, so a test that only
+    /// exercises the exclusion through `starfield` — even one that asserts
+    /// against `box_margin(box_rect, area)` rather than `box_rect` — would
+    /// stay self-consistent, and so still green, if `box_margin` regressed
+    /// to the identity: both the exclusion and the test's own yardstick
+    /// would shrink together).
+    #[test]
+    fn box_margin_grows_the_rect_by_one_cell_in_every_direction() {
+        let area = Rect::new(0, 0, 80, 24);
+        let box_rect = Rect::new(20, 5, 40, 13);
+        let margin = box_margin(box_rect, area);
+        assert_eq!(margin, Rect::new(19, 4, 42, 15));
+    }
+
+    /// Asserts against `box_margin`'s grown rect (what production actually
+    /// excludes against), not `box_rect` itself: `box_margin` is always a
+    /// superset of `box_rect`, so asserting only the weaker bound would stay
+    /// green even if `box_margin` regressed to the identity and silently
+    /// deleted the one-cell buffer. (The regression itself is pinned
+    /// independently by the `box_margin` test above; this test is about
+    /// `starfield` actually honouring whatever `box_margin` computes.)
     #[test]
     fn the_starfield_never_places_a_star_behind_the_console_block() {
         let area = Rect::new(0, 0, 80, 24);
         let box_rect = Rect::new(20, 5, 40, 13);
+        let margin = box_margin(box_rect, area);
         for phase in [0.0, 1.3, 5.0] {
             for progress in [0.0, 0.5, 1.0] {
                 for (_, col, row) in starfield(area, box_rect, phase, progress) {
-                    assert!(!in_rect(col, row, box_rect), "star landed inside the box at ({col},{row})");
+                    assert!(
+                        !margin.contains(Position::new(col, row)),
+                        "star landed inside the margin at ({col},{row})"
+                    );
                 }
             }
+        }
+    }
+
+    /// The same exclusion, but with `area` inset from the screen origin —
+    /// `starfield` walks cells in `0..area.width`/`0..area.height` while
+    /// `box_rect` (from `centered`) is in absolute screen coordinates, so an
+    /// inset `area` is the case that would catch the two spaces drifting
+    /// apart (see `relative_to`). Masked in every other test here because
+    /// they all use `Rect::new(0, 0, ...)`, where the two spaces coincide.
+    #[test]
+    fn the_starfield_exclusion_still_works_when_area_is_inset_from_the_screen_origin() {
+        let area = Rect::new(3, 4, 80, 20);
+        let box_rect = centered(area, 40, 10);
+        let frame = Rect { x: 0, y: 0, width: area.width, height: area.height };
+        let margin = box_margin(relative_to(box_rect, area), frame);
+        for (_, col, row) in starfield(area, box_rect, 2.0, 1.0) {
+            assert!(col < area.width && row < area.height, "star out of bounds at ({col},{row})");
+            let inside = margin.contains(Position::new(col, row));
+            assert!(!inside, "star landed inside the margin at ({col},{row})");
         }
     }
 
@@ -656,8 +811,7 @@ mod tests {
         let mut last_x = f64::NEG_INFINITY;
         for i in 0..=20 {
             let progress = i as f32 / 20.0;
-            let (t, x, _) = point_at(area, box_top, progress);
-            assert_eq!(t, progress);
+            let (_, x, _) = point_at(area, box_top, progress);
             assert!(x >= last_x, "x should never move backwards as progress advances");
             last_x = x;
         }
@@ -667,13 +821,12 @@ mod tests {
     fn the_transit_arc_clears_the_console_block_at_the_minimum_terminal_size() {
         let area = Rect::new(0, 0, 80, 24);
         let lines = boot_lines(None, None, 25544, false);
-        let full = boot_text(&lines, lines.len(), 1.0);
-        let height = full.len() as u16;
-        let width = full.iter().map(Line::width).max().unwrap_or(0) as u16;
+        let (width, height) = boot_box_size(&lines);
         let box_rect = centered(area, width, height);
 
         for progress in [0.0, 0.1, 0.25, 0.5, 0.75, 0.9, 1.0] {
-            for (t, _, y) in transit_track(area, box_rect, progress) {
+            let (track, _) = transit_track(area, box_rect, progress);
+            for (t, _, y) in track {
                 let row = f64::from(area.height) - y;
                 assert!(
                     row < f64::from(box_rect.y),
@@ -681,6 +834,99 @@ mod tests {
                     box_rect.y
                 );
             }
+        }
+    }
+
+    /// Same clearance check, but with `area` inset from the screen origin —
+    /// the case that would catch `transit_track`'s `box_top` drifting out of
+    /// the area-relative space `transit_row` expects (see `relative_to`).
+    #[test]
+    fn the_transit_arc_still_clears_the_console_block_when_area_is_inset() {
+        let area = Rect::new(3, 4, 80, 20);
+        let lines = boot_lines(None, None, 25544, false);
+        let (width, height) = boot_box_size(&lines);
+        let box_rect = centered(area, width, height);
+
+        for progress in [0.0, 0.25, 0.5, 0.75, 1.0] {
+            let (track, _) = transit_track(area, box_rect, progress);
+            for (t, _, y) in track {
+                let row = f64::from(area.height) - y;
+                assert!(
+                    row < f64::from(relative_to(box_rect, area).y),
+                    "arc dipped into the box at progress {progress}, t {t}: row {row}"
+                );
+            }
+        }
+    }
+
+    /// The index `transit_track` returns must always address the point it
+    /// just spliced in at `progress` — the invariant `paint` relies on
+    /// instead of re-deriving the split itself, so `flown.last()` is
+    /// provably the satellite's own position rather than a fixed sample
+    /// that merely happens to be nearby.
+    #[test]
+    fn the_transit_track_index_addresses_its_own_spliced_point() {
+        let area = Rect::new(0, 0, 80, 24);
+        let box_rect = Rect::new(20, 5, 40, 13);
+        for progress in [0.0, 0.1, 0.37, 0.5, 0.83, 1.0] {
+            let (track, idx) = transit_track(area, box_rect, progress);
+            let expected = progress.clamp(0.0, 1.0);
+            assert_eq!(track[idx].0, expected, "index doesn't address the spliced point");
+        }
+    }
+
+    /// `paint`'s `&track[..=idx.min(track.len() - 1)]` looks guarded against
+    /// an empty track but isn't (`..=0` still needs `len >= 1`). Unreachable
+    /// through `Canvas` today (it early-returns on an empty area before
+    /// calling `paint`), so this drives `paint` directly to pin the guard
+    /// itself rather than relying on that upstream early-return.
+    #[test]
+    fn paint_does_not_panic_on_a_zero_size_area() {
+        for area in [Rect::new(0, 0, 0, 24), Rect::new(0, 0, 80, 0)] {
+            let box_rect = centered(area, 10, 5);
+            // Built directly rather than through the `Canvas` widget: `Canvas`
+            // early-returns on an empty render area before ever calling
+            // `paint`, which is exactly why this guard is unreachable in
+            // production — calling `paint` straight through `Context::new`
+            // exercises its own guard instead of relying on that.
+            let x_bounds = [0.0, f64::from(area.width)];
+            let y_bounds = [0.0, f64::from(area.height)];
+            let mut ctx = Context::new(area.width, area.height, x_bounds, y_bounds, Marker::Braille);
+            paint(&mut ctx, area, box_rect, 0.0, 0.5);
+        }
+    }
+
+    /// The regression this pins: `STAR_ROW_SEED` used to be
+    /// `STAR_COL_SEED.wrapping_add(1)`, which collided with
+    /// `STAR_TWINKLE_SEED` (both `0x5742`) — a star's row and its twinkle
+    /// offset came from the same hash roll, so twinkle swept as a
+    /// top-to-bottom band instead of scattering. Cheap and direct: check the
+    /// lanes are distinct rather than a statistical property of the output.
+    #[test]
+    fn the_starfield_noise_lanes_are_pairwise_distinct() {
+        let seeds = [STAR_COL_SEED, STAR_ROW_SEED, STAR_TWINKLE_SEED, STAR_FADE_SEED];
+        for i in 0..seeds.len() {
+            for j in (i + 1)..seeds.len() {
+                assert_ne!(seeds[i], seeds[j], "lanes {i} and {j} share a seed");
+            }
+        }
+    }
+
+    /// `boot_box_size` computes its width/height arithmetically instead of
+    /// building the full styled `boot_text`; this pins it to agree exactly
+    /// with what that construction would still measure.
+    #[test]
+    fn boot_box_size_agrees_with_the_fully_revealed_fully_lit_boot_text() {
+        for (station, sat, offline) in [
+            (None, 25544, false),
+            (Some(GeoPoint::new(48.137, 11.575, 0.0)), 25544, true),
+            (Some(GeoPoint::new(-33.865, -70.9, 0.0)), 999999, false),
+        ] {
+            let lines = boot_lines(station, None, sat, offline);
+            let full = boot_text(&lines, lines.len(), 1.0);
+            let expected_height = full.len() as u16;
+            let expected_width = full.iter().map(Line::width).max().unwrap_or(0) as u16;
+            assert_eq!(boot_box_size(&lines), (expected_width, expected_height));
         }
     }
 
