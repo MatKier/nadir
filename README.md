@@ -9,7 +9,7 @@ only ever fetches an orbit description, never a position.
 *Nadir* is the point on Earth directly beneath a satellite, which is what the
 centerpiece map tracks.
 
-![nadir tracking the ISS from a Weilheim ground station: the world map with ground track, footprint, labelled cities and the aurora oval, an orthographic globe view, the clock warping forward to 300x while the ground track stretches, and a sky plot of the next pass](docs/demo.gif)
+![nadir tracking TANDEM-X from a Weilheim ground station: the world map with ground track, footprint, labelled cities, the aurora oval and the Sun and Moon, an orthographic globe, the follow window zooming in, the clock warping to 300x, the tracked list and telemetry downlinks, a sky plot of the next pass, space weather and launches](docs/demo.gif)
 
 > **Note:** this project is entirely AI-generated. No line of it was written or
 > reviewed by hand. Treat it accordingly.
