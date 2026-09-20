@@ -103,7 +103,10 @@ pub fn draw(
         pass_rows(passes, now, lead, budget).into_iter().map(ListItem::new).collect();
 
     let selected = focused.then(|| app.list_pos.min(passes.len().saturating_sub(1)));
-    let rows = render_list(frame, list_area, list_area, items, selected, |list| {
+    // The block was drawn on its own above, so the list gets the inner rect and
+    // the scrollbar the outer `area` (its right border, pulsing with the AOS
+    // tint, which the bar reads off it).
+    let rows = render_list(frame, area, list_area, list_area, items, selected, |list| {
         list.highlight_style(row_highlight()).highlight_symbol("▶ ")
     });
 

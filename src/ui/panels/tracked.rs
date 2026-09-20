@@ -29,10 +29,14 @@ pub fn draw(frame: &mut Frame, area: Rect, app: &App) -> Vec<RowSpan> {
     }
 
     // Budget the name against the panel's actual width: two border columns,
-    // the "●"/"  " active marker, the space `highlight_symbol` reserves, and
-    // a fixed "NORAD nnnnn" column on the right.
+    // the "●"/"  " active marker, the space `highlight_symbol` reserves, a
+    // fixed "NORAD nnnnn" column on the right, and one spare column after it.
+    // Without the spare the id's last digit fills the inner width exactly and
+    // sits flush against the border column the scrollbar is drawn on. It is
+    // reserved whether or not the bar is showing, so rows don't reflow the
+    // moment the list grows past a page.
     const ID_W: usize = 11;
-    const OVERHEAD: usize = 2 + 2 + 2;
+    const OVERHEAD: usize = 2 + 2 + 2 + 1;
     let name_w = (area.width as usize).saturating_sub(OVERHEAD + ID_W).max(4);
 
     let items: Vec<ListItem> = app
@@ -62,7 +66,7 @@ pub fn draw(frame: &mut Frame, area: Rect, app: &App) -> Vec<RowSpan> {
     let selected = if focused { Some(app.list_pos.min(last)) } else { active };
     // The block goes to the `List`, so its inner rect is taken before it moves.
     let inner = block.inner(area);
-    render_list(frame, area, inner, items, selected, |list| {
+    render_list(frame, area, area, inner, items, selected, |list| {
         let list = list.block(block);
         if focused {
             list.highlight_style(row_highlight()).highlight_symbol("▶ ")

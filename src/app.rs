@@ -154,7 +154,49 @@ impl AppData {
 pub struct SatPicker {
     pub query: String,
     pub selected: usize,
+    /// Index of the first result row on screen. Stored rather than re-derived
+    /// from `selected` at render time so a click can select a row without the
+    /// list scrolling under the pointer — a derived window would slide the
+    /// clicked row away and a double-click could never land on one index
+    /// twice. The hand-rolled counterpart of the `ListState` offset the three
+    /// list panels get from ratatui (see `ui::hit::render_list`); the popup is
+    /// a `Paragraph`, not a `List`, so it keeps its own.
+    pub offset: usize,
 }
+
+/// How many result rows the search popup shows at once. The popup is a fixed
+/// size (see `ui::sat_input_popup`) so this is a constant, which is what lets
+/// key handling keep `SatPicker::offset` current without a `Frame`.
+pub const SEARCH_VISIBLE: usize = 8;
+
+/// `offset` scrolled just far enough to keep `selected` inside a window of
+/// `visible` rows — the ordinary "only move when the selection leaves the
+/// window" rule, shared by both pickers. Render clamps the result against the
+/// list's length, which this doesn't know.
+fn follow(selected: usize, offset: usize, visible: usize) -> usize {
+    if selected < offset {
+        selected
+    } else if selected >= offset + visible {
+        selected + 1 - visible
+    } else {
+        offset
+    }
+}
+
+impl SatPicker {
+    /// Move the selection by `delta` within `len` results and keep the window on
+    /// it. What `↑`/`↓` and the wheel all do, so the clamp is written once.
+    fn step(&mut self, delta: i32, len: usize) {
+        self.selected = step_index(self.selected, delta, len);
+        self.offset = follow(self.selected, self.offset, SEARCH_VISIBLE);
+    }
+}
+
+/// How many downlink rows the `T` popup shows at once — a constant for the same
+/// reason as [`SEARCH_VISIBLE`]: the popup is a fixed size (see
+/// `ui::transmitter_popup`), so key handling can keep [`TxPicker::offset`]
+/// current without a `Frame`.
+pub const TX_VISIBLE: usize = 10;
 
 /// State of the open transmitter picker (`T`). No query field: unlike the
 /// satellite picker this is a choice from a list already in hand
@@ -162,6 +204,20 @@ pub struct SatPicker {
 #[derive(Debug, Default)]
 pub struct TxPicker {
     pub selected: usize,
+    /// Index of the first downlink row on screen, kept on the selection by
+    /// [`Self::step`] with the same rule as [`SatPicker::offset`]. Stored rather
+    /// than derived from `selected` at render time so a click can select a row
+    /// without the window following it: a follow would slide the clicked row
+    /// away and a double-click could never land on one index.
+    pub offset: usize,
+}
+
+impl TxPicker {
+    /// [`SatPicker::step`] for the downlink list.
+    fn step(&mut self, delta: i32, len: usize) {
+        self.selected = step_index(self.selected, delta, len);
+        self.offset = follow(self.selected, self.offset, TX_VISIBLE);
+    }
 }
 
 /// State of the open "go to time" prompt (`g`): the raw text and the last parse
@@ -261,10 +317,10 @@ pub struct App {
     /// `handle_mouse` to map a click back to. Written by `ui::draw` (which
     /// empties it first, so a frame with no dashboard leaves nothing to click).
     pub hit: ui::HitMap,
-    /// The last list-row click — when, and which panel and row — so a second
+    /// The last list-row click — when, and which list and row — so a second
     /// click on the same row within `DOUBLE_CLICK` reads as a double-click.
     /// Terminals report only individual presses, so this is tracked by hand.
-    last_click: Option<(Instant, Panel, usize)>,
+    last_click: Option<(Instant, ClickTarget, usize)>,
     /// The disk cache `run` opened for the whole session — kept here so
     /// `switch_satellite` can warm-start the new satellite's element set from
     /// it directly, the same `Feed::recover` call `load_all_from_cache` makes
@@ -431,20 +487,28 @@ impl App {
     /// at an edge don't build up a backlog that later presses have to work
     /// through before the selection visibly moves.
     fn scroll(&mut self, delta: i32) {
-        let max_index = match self.focus {
-            Panel::Tracked => self.config.tracked.len().saturating_sub(1),
-            Panel::Passes => self.upcoming_passes(self.sim_now()).len().saturating_sub(1),
-            Panel::Launches => self
-                .data
-                .read()
-                .ok()
-                .and_then(|d| d.launches.get().map(|l| l.list.len()))
-                .unwrap_or(0)
-                .saturating_sub(1),
-            Panel::Map | Panel::Telemetry | Panel::Weather => return,
-        };
-        let next = self.list_pos as i32 + delta;
-        self.list_pos = next.clamp(0, max_index as i32) as usize;
+        let Some(len) = self.list_len(self.focus) else { return };
+        self.list_pos = step_index(self.list_pos, delta, len);
+    }
+
+    /// How many rows `panel`'s list has, or `None` for a panel that has no list
+    /// at all (the map, TELEMETRY, SPACE WEATHER). The one place that knows which
+    /// panels scroll: `scroll` reads it for its clamp and `handle_wheel` for
+    /// whether a notch over a panel means anything, so a new list panel is added
+    /// here and nowhere else.
+    fn list_len(&self, panel: Panel) -> Option<usize> {
+        match panel {
+            Panel::Tracked => Some(self.config.tracked.len()),
+            Panel::Passes => Some(self.upcoming_passes(self.sim_now()).len()),
+            Panel::Launches => Some(
+                self.data
+                    .read()
+                    .ok()
+                    .and_then(|d| d.launches.get().map(|l| l.list.len()))
+                    .unwrap_or(0),
+            ),
+            Panel::Map | Panel::Telemetry | Panel::Weather => None,
+        }
     }
 
     /// Drop the cached pass list so `refresh_passes` rebuilds it on the next
@@ -575,28 +639,69 @@ impl App {
         }
     }
 
-    /// A left click, mapped through what the last frame drew (`self.hit`).
-    /// Every other mouse event was dropped in `forwards` before reaching here,
-    /// but is re-checked so this stays correct if it is ever called directly.
+    /// A left click or a wheel notch, mapped through what the last frame drew
+    /// (`self.hit`). Every other mouse event was dropped in `forwards` before
+    /// reaching here, but is re-checked so this stays correct if it is ever
+    /// called directly.
     ///
-    /// In order: the boot splash swallows it exactly as it does a keypress; an
+    /// The boot splash swallows either exactly as it does a keypress — a notch
+    /// is as deliberate as a key, so it skips the splash too. A wheel notch is
+    /// then handed to `handle_wheel`. For a click, in order: an
     /// open popup or the help overlay swallows it (they swallow keys the same
-    /// way, and the dashboard behind them is not what a click meant); the
+    /// way, and the dashboard behind them is not what a click meant — though the
+    /// `s` and `T` popups first act on a click that lands on one of their
+    /// rows); the
     /// title bar's badge launches the easter egg; a list row focuses its panel
     /// and selects that row; anything else inside a panel just focuses it.
     fn handle_mouse(&mut self, m: MouseEvent) {
-        if !matches!(m.kind, MouseEventKind::Down(MouseButton::Left)) {
-            return;
-        }
+        // Negative is up the list, as `k` is.
+        let wheel = match m.kind {
+            MouseEventKind::ScrollUp => Some(-WHEEL_ROWS),
+            MouseEventKind::ScrollDown => Some(WHEEL_ROWS),
+            MouseEventKind::Down(MouseButton::Left) => None,
+            _ => return,
+        };
         if self.splash_active() {
             self.splash_skipped = true;
             return;
         }
-        if self.sat_input.is_some()
-            || self.tx_input.is_some()
-            || self.time_input.is_some()
-            || self.show_help
-        {
+        // Before the click path so a notch can never reach `is_double` or the
+        // badge — neither is a wheel's business.
+        if let Some(delta) = wheel {
+            self.handle_wheel(delta, m.column, m.row);
+            return;
+        }
+        // The search popup is one of two modals with clickable rows. It handles
+        // the click and returns either way, so a click inside it but off a
+        // result, or outside it entirely, still can't reach the dashboard
+        // (or the badge) underneath. `reset_search` is deliberately not
+        // called: the query is unchanged and it would discard the results.
+        if self.sat_input.is_some() {
+            if let Some(index) = self.hit.popup_row_at(m.column, m.row) {
+                if let Some(p) = self.sat_input.as_mut() {
+                    p.selected = index;
+                }
+                if self.is_double(ClickTarget::Search, index) {
+                    self.submit_sat_input();
+                }
+            }
+            return;
+        }
+        // The transmitter picker is the other: same shape, and the same
+        // "selected and nothing else" rule — `TxPicker::step` would move
+        // `offset` onto the row and slide the list under the second click.
+        if self.tx_input.is_some() {
+            if let Some(index) = self.hit.popup_row_at(m.column, m.row) {
+                if let Some(p) = self.tx_input.as_mut() {
+                    p.selected = index;
+                }
+                if self.is_double(ClickTarget::Transmitter, index) {
+                    self.submit_tx_input();
+                }
+            }
+            return;
+        }
+        if self.time_input.is_some() || self.show_help {
             return;
         }
 
@@ -615,17 +720,69 @@ impl App {
             // A double-click on a TRACKED entry is `Enter` on it. The pair is
             // consumed, so a third click starts a fresh one rather than
             // counting as another double.
-            let double = self
-                .last_click
-                .take()
-                .is_some_and(|(at, p, i)| p == panel && i == index && at.elapsed() < DOUBLE_CLICK);
-            self.last_click = (!double).then(|| (Instant::now(), panel, index));
+            let double = self.is_double(ClickTarget::Panel(panel), index);
             if double && panel == Panel::Tracked {
                 self.track_selected();
             }
         } else if let Some(panel) = self.hit.panel_at(col, row) {
             self.focus_clicked(panel);
         }
+    }
+
+    /// A wheel notch of `delta` rows (negative is up), at `(col, row)`.
+    ///
+    /// An open modal takes it wherever the pointer is, the same rule
+    /// `handle_key`'s modal chain follows — which is why the wheel needs no
+    /// popup rect, though a click does (see `handle_mouse`). With none open, it scrolls the list panel under
+    /// the pointer; over a panel with no list it does nothing at all, not even
+    /// take focus, since a wheel that steals focus and then scrolls nothing is
+    /// worse than an inert one.
+    ///
+    /// There is a single `list_pos`, shared by whichever panel has focus, so
+    /// scrolling an unfocused panel without focusing it is not representable:
+    /// the first notch over one re-seeds `list_pos` through `set_focus` (TRACKED
+    /// to the satellite being tracked, the others to the top) and then moves it,
+    /// the same jump a click makes. The order is load-bearing: the step starts
+    /// from whatever `set_focus` re-seeded, not from the old panel's position.
+    fn handle_wheel(&mut self, delta: i32, col: u16, row: u16) {
+        // A double-click is two clicks *in a row*: a notch between them means
+        // the user did something else, and may well have moved the list under
+        // the pointer, so the pair is broken rather than left to complete.
+        self.last_click = None;
+        // `step_index` leaves an empty list at 0, so neither picker needs a
+        // "has results" guard here.
+        if let Some(p) = self.sat_input.as_mut() {
+            p.step(delta, search_result_count(&self.data));
+            return;
+        }
+        if let Some(p) = self.tx_input.as_mut() {
+            p.step(delta, transmitter_count(&self.data));
+            return;
+        }
+        if self.time_input.is_some() {
+            return;
+        }
+        if self.show_help {
+            // Clamped against the content height at render time, like `End`.
+            self.help_scroll = self.help_scroll.saturating_add_signed(delta as i16);
+            return;
+        }
+        let Some(panel) = self.hit.panel_at(col, row) else { return };
+        let Some(len) = self.list_len(panel) else { return };
+        self.focus_clicked(panel);
+        self.list_pos = step_index(self.list_pos, delta, len);
+    }
+
+    /// Record a list-row click and report whether it completes a double-click
+    /// on the same row of the same list. The pair is consumed, so a third
+    /// click starts a fresh one rather than counting as another double.
+    fn is_double(&mut self, target: ClickTarget, index: usize) -> bool {
+        let double = self
+            .last_click
+            .take()
+            .is_some_and(|(at, t, i)| t == target && i == index && at.elapsed() < DOUBLE_CLICK);
+        self.last_click = (!double).then(|| (Instant::now(), target, index));
+        double
     }
 
     /// Focus `panel` for a click, but only if it isn't already focused:
@@ -670,28 +827,17 @@ impl App {
                 KeyCode::Char(c) if !c.is_control() && picker.query.chars().count() < 32 => {
                     picker.query.push(c);
                     picker.selected = 0;
+                    picker.offset = 0;
                     self.reset_search();
                 }
                 KeyCode::Backspace => {
                     picker.query.pop();
                     picker.selected = 0;
+                    picker.offset = 0;
                     self.reset_search();
                 }
-                KeyCode::Up => picker.selected = picker.selected.saturating_sub(1),
-                KeyCode::Down => {
-                    let len = self
-                        .data
-                        .read()
-                        .ok()
-                        .and_then(|d| match &d.search {
-                            SearchState::Done { results, .. } => Some(results.len()),
-                            _ => None,
-                        })
-                        .unwrap_or(0);
-                    if len > 0 {
-                        picker.selected = (picker.selected + 1).min(len - 1);
-                    }
-                }
+                KeyCode::Up => picker.step(-1, search_result_count(&self.data)),
+                KeyCode::Down => picker.step(1, search_result_count(&self.data)),
                 KeyCode::Enter => self.submit_sat_input(),
                 KeyCode::Esc => self.sat_input = None,
                 _ => {}
@@ -704,23 +850,8 @@ impl App {
         // the time prompt in the same "at most one modal takes input" chain.
         if let Some(picker) = self.tx_input.as_mut() {
             match key.code {
-                KeyCode::Up | KeyCode::Char('k') => {
-                    picker.selected = picker.selected.saturating_sub(1)
-                }
-                KeyCode::Down | KeyCode::Char('j') => {
-                    let len = self
-                        .data
-                        .read()
-                        .ok()
-                        .and_then(|d| match &d.tx_lookup {
-                            TransmitterState::Done { found, .. } => Some(found.len()),
-                            _ => None,
-                        })
-                        .unwrap_or(0);
-                    if len > 0 {
-                        picker.selected = (picker.selected + 1).min(len - 1);
-                    }
-                }
+                KeyCode::Up | KeyCode::Char('k') => picker.step(-1, transmitter_count(&self.data)),
+                KeyCode::Down | KeyCode::Char('j') => picker.step(1, transmitter_count(&self.data)),
                 KeyCode::Enter => self.submit_tx_input(),
                 KeyCode::Esc => self.tx_input = None,
                 _ => {}
@@ -1463,8 +1594,57 @@ pub fn shutdown_runtime(runtime: tokio::runtime::Runtime) {
 /// it draws no `night_wash`-style per-cell resample, so the frame it costs is
 /// cheap and bounded — worth spending to keep a satellite crossing the whole
 /// frame from stepping across it in visible jumps.
+/// What a list-row click landed on: one of the dashboard's panels, or one of the
+/// two popups (which are not a `Panel`, so can't key a double-click themselves).
+/// The popups are separate variants so a click on a search row and then on the
+/// same-numbered downlink row can never complete a double across modals.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ClickTarget {
+    Panel(Panel),
+    Search,
+    Transmitter,
+}
+
 /// How close together two clicks on one row must be to count as a double-click.
 const DOUBLE_CLICK: Duration = Duration::from_millis(400);
+
+/// Rows one wheel notch moves a list, a popup's selection or the `?` overlay —
+/// one constant for all of them so they can't drift apart. Three, not one: a
+/// notch is a coarser gesture than a keypress, and three is what a terminal's
+/// own scrollback does.
+const WHEEL_ROWS: i32 = 3;
+
+/// `pos` moved by `delta` and clamped into a list of `len` rows. Clamped here
+/// rather than left to render so repeated notches at an edge don't build up a
+/// backlog that later ones must work through before anything visibly moves.
+/// `len` of zero yields 0.
+fn step_index(pos: usize, delta: i32, len: usize) -> usize {
+    (pos as i64 + delta as i64).clamp(0, len.saturating_sub(1) as i64) as usize
+}
+
+/// How many results the search popup has, or 0 while it has none (idle, busy,
+/// failed). A free function over the data lock rather than an `App` method so a
+/// key handler can call it while it still holds `&mut` on the picker.
+fn search_result_count(data: &RwLock<AppData>) -> usize {
+    data.read()
+        .ok()
+        .and_then(|d| match &d.search {
+            SearchState::Done { results, .. } => Some(results.len()),
+            _ => None,
+        })
+        .unwrap_or(0)
+}
+
+/// [`search_result_count`] for the `T` picker's SatNOGS downlinks.
+fn transmitter_count(data: &RwLock<AppData>) -> usize {
+    data.read()
+        .ok()
+        .and_then(|d| match &d.tx_lookup {
+            TransmitterState::Done { found, .. } => Some(found.len()),
+            _ => None,
+        })
+        .unwrap_or(0)
+}
 
 const FRAME_LIVE: Duration = Duration::from_millis(250);
 const FRAME_ANIM: Duration = Duration::from_millis(100);
@@ -1516,23 +1696,13 @@ async fn render_loop(
             _ = tokio::time::sleep(frame_interval(app.clock.state(), app.is_animating(), app.showpiece_active())) => {}
             maybe_event = input_rx.recv() => {
                 match maybe_event {
-                    Some(Event::Mouse(m)) => app.handle_mouse(m),
+                    Some(Event::Mouse(m)) => {
+                        app.handle_mouse(m);
+                        drain_input(app, &mut input_rx);
+                    }
                     Some(Event::Key(key)) => {
                         app.handle_key(key);
-                        // Auto-repeat can queue keys faster than a frame takes
-                        // to draw. Fold everything already waiting into this one
-                        // frame rather than drawing a frame per keystroke and
-                        // falling further behind the queue with each one.
-                        while !app.should_quit {
-                            match input_rx.try_recv() {
-                                Ok(Event::Key(k)) => app.handle_key(k),
-                                // Not swallowed with the rest: a click queued
-                                // behind a held key would otherwise vanish.
-                                Ok(Event::Mouse(m)) => app.handle_mouse(m),
-                                Ok(_) => {}
-                                Err(_) => break,
-                            }
-                        }
+                        drain_input(app, &mut input_rx);
                     }
                     Some(_) => {}
                     None => return Ok(()), // input thread ended
@@ -1543,14 +1713,38 @@ async fn render_loop(
 }
 
 /// Whether an input event is worth waking the render loop for. Everything is,
-/// except the mouse traffic other than a left click: with capture on, the
-/// terminal reports every motion and drag, and each of those forwarded would
-/// wake the `select!` and redraw at event cadence, defeating `frame_interval`'s
-/// 4 fps idle floor. Dropped here, in the producer, so they never reach it.
+/// except the mouse traffic that is not a discrete, deliberate act: a left click
+/// and a wheel notch are each one thing the user did, like a keypress, but with
+/// capture on the terminal also reports every motion and drag, and each of those
+/// forwarded would wake the `select!` and redraw at event cadence, defeating
+/// `frame_interval`'s 4 fps idle floor. Dropped here, in the producer, so they
+/// never reach it. Sideways scroll is dropped with them: nothing scrolls that way.
 fn forwards(ev: &Event) -> bool {
     match ev {
-        Event::Mouse(m) => matches!(m.kind, MouseEventKind::Down(MouseButton::Left)),
+        Event::Mouse(m) => matches!(
+            m.kind,
+            MouseEventKind::Down(MouseButton::Left)
+                | MouseEventKind::ScrollUp
+                | MouseEventKind::ScrollDown
+        ),
         _ => true,
+    }
+}
+
+/// Fold every input event already waiting into the frame about to be drawn.
+/// Auto-repeat can queue keys, and a wheel flick queues a burst of notches,
+/// faster than a frame takes to draw; drawing one frame per event would fall
+/// further behind the queue with each one.
+fn drain_input(app: &mut App, input_rx: &mut mpsc::UnboundedReceiver<Event>) {
+    while !app.should_quit {
+        match input_rx.try_recv() {
+            Ok(Event::Key(k)) => app.handle_key(k),
+            // Not swallowed with the rest: a click queued behind a held key
+            // would otherwise vanish.
+            Ok(Event::Mouse(m)) => app.handle_mouse(m),
+            Ok(_) => {}
+            Err(_) => break,
+        }
     }
 }
 
@@ -2415,7 +2609,7 @@ mod tests {
     fn submit_sat_input_tracks_the_highlighted_result_for_a_matching_query() {
         let config = Config::default();
         let mut app = test_app(config);
-        app.sat_input = Some(SatPicker { query: "hst".to_string(), selected: 0 });
+        app.sat_input = Some(SatPicker { query: "hst".to_string(), ..Default::default() });
         if let Ok(mut d) = app.data.write() {
             d.search = SearchState::Done {
                 query: "hst".to_string(),
@@ -2431,7 +2625,7 @@ mod tests {
     fn submit_sat_input_submits_a_fresh_search_when_no_result_is_showing_yet() {
         let config = Config::default();
         let mut app = test_app(config);
-        app.sat_input = Some(SatPicker { query: "hubble".to_string(), selected: 0 });
+        app.sat_input = Some(SatPicker { query: "hubble".to_string(), ..Default::default() });
         app.submit_sat_input();
         // Nothing to select yet, so the popup must stay open for the result.
         assert!(app.sat_input.is_some());
@@ -2445,13 +2639,12 @@ mod tests {
         app.handle_key(KeyEvent::new(code, KeyModifiers::NONE));
     }
 
+    fn mouse_at(app: &mut App, kind: MouseEventKind, col: u16, row: u16) {
+        app.handle_mouse(MouseEvent { kind, column: col, row, modifiers: KeyModifiers::NONE });
+    }
+
     fn click(app: &mut App, col: u16, row: u16) {
-        app.handle_mouse(MouseEvent {
-            kind: MouseEventKind::Down(MouseButton::Left),
-            column: col,
-            row,
-            modifiers: KeyModifiers::NONE,
-        });
+        mouse_at(app, MouseEventKind::Down(MouseButton::Left), col, row);
     }
 
     /// Draw one real frame into an in-memory terminal, so `app.hit` is what
@@ -2617,8 +2810,8 @@ mod tests {
         let sat = app.config.sat;
         let (x, y) = tracked_row_y(&app, 1);
         click(&mut app, x, y);
-        app.last_click = app.last_click.map(|(_, p, i)| {
-            (Instant::now() - DOUBLE_CLICK - Duration::from_millis(1), p, i)
+        app.last_click = app.last_click.map(|(_, t, i)| {
+            (Instant::now() - DOUBLE_CLICK - Duration::from_millis(1), t, i)
         });
         click(&mut app, x, y);
         assert_eq!(app.config.sat, sat, "too slow to be a double-click");
@@ -2763,14 +2956,153 @@ mod tests {
         assert!(app.egg.is_none(), "and so does the help overlay");
     }
 
+    /// A drawn app with the search popup open on `n` results named
+    /// `STARLINK-<i>` (NORAD `1000 + i`), the way a broad query leaves it.
+    fn app_with_search_results(n: usize) -> App {
+        let mut app = drawn_app_with_tracked();
+        app.sat_input = Some(SatPicker { query: "starlink".to_string(), ..Default::default() });
+        if let Ok(mut d) = app.data.write() {
+            d.search = SearchState::Done {
+                query: "starlink".to_string(),
+                results: (0..n)
+                    .map(|i| SatMatch { norad_id: 1000 + i as u64, name: format!("STARLINK-{i}") })
+                    .collect(),
+            };
+        }
+        draw_frame(&mut app, 140, 40);
+        app
+    }
+
+    /// Where the open popup (`s` or `T`) drew row `index`, as a click position.
+    fn popup_row_pos(app: &App, index: usize) -> (u16, u16) {
+        let (rect, spans) = app.hit.popup.as_ref().expect("the popup was drawn");
+        let y = spans.iter().find(|s| s.2 == index).expect("that row is on screen").0;
+        (rect.x + 4, y)
+    }
+
     #[test]
-    fn only_a_left_click_is_acted_on() {
+    fn the_search_popups_row_spans_sit_on_the_lines_that_hold_those_results() {
+        // Pins the one-line-per-row assumption the spans rest on: if a row or
+        // the input line ever wrapped, every span below it would be off by one.
+        let mut app = app_with_search_results(20);
+        let buf = draw_frame(&mut app, 140, 40);
+        let (_, spans) = app.hit.popup.clone().unwrap();
+        assert_eq!(spans.len(), SEARCH_VISIBLE);
+        for (y0, _, index) in spans {
+            let line: String = (0..buf.area.width).map(|x| buf[(x, y0)].symbol().to_string()).collect();
+            assert!(line.contains(&format!("STARLINK-{index} ")), "row {y0}: {line:?}");
+        }
+    }
+
+    #[test]
+    fn clicking_a_search_result_moves_the_highlight_to_it() {
+        let mut app = app_with_search_results(5);
+        let (x, y) = popup_row_pos(&app, 3);
+        click(&mut app, x, y);
+        assert_eq!(app.sat_input.as_ref().unwrap().selected, 3);
+        assert!(app.sat_input.is_some(), "one click only selects");
+    }
+
+    #[test]
+    fn double_clicking_a_search_result_tracks_it_and_closes_the_popup() {
+        let mut app = app_with_search_results(5);
+        let (x, y) = popup_row_pos(&app, 2);
+        click(&mut app, x, y);
+        click(&mut app, x, y);
+        assert_eq!(app.config.sat, 1002);
+        assert_eq!(app.config.tracked_name(1002), Some("STARLINK-2"));
+        assert!(app.sat_input.is_none());
+    }
+
+    #[test]
+    fn two_clicks_on_different_search_results_are_not_a_double_click() {
+        let mut app = app_with_search_results(5);
+        let sat = app.config.sat;
+        let (x, y1) = popup_row_pos(&app, 1);
+        let (_, y2) = popup_row_pos(&app, 2);
+        click(&mut app, x, y1);
+        click(&mut app, x, y2);
+        assert_eq!(app.config.sat, sat);
+        assert!(app.sat_input.is_some());
+    }
+
+    #[test]
+    fn clicking_a_result_does_not_move_the_viewport() {
+        let mut app = app_with_search_results(20);
+        for _ in 0..19 {
+            press_code(&mut app, KeyCode::Down);
+        }
+        draw_frame(&mut app, 140, 40);
+        let offset = app.sat_input.as_ref().unwrap().offset;
+        assert_eq!(offset, 12, "the window followed the selection down to the end");
+        let (x, y) = popup_row_pos(&app, 12);
+        click(&mut app, x, y);
+        draw_frame(&mut app, 140, 40);
+        assert_eq!(app.sat_input.as_ref().unwrap().selected, 12);
+        assert_eq!(app.sat_input.as_ref().unwrap().offset, offset);
+        assert_eq!(popup_row_pos(&app, 12), (x, y), "the clicked row stayed put");
+    }
+
+    #[test]
+    fn double_clicking_a_result_in_a_scrolled_list_tracks_it() {
+        let mut app = app_with_search_results(20);
+        for _ in 0..19 {
+            press_code(&mut app, KeyCode::Down);
+        }
+        draw_frame(&mut app, 140, 40);
+        let (x, y) = popup_row_pos(&app, 12);
+        click(&mut app, x, y);
+        draw_frame(&mut app, 140, 40);
+        click(&mut app, x, y);
+        assert_eq!(app.config.sat, 1012);
+    }
+
+    #[test]
+    fn scrolling_up_past_the_top_of_the_window_brings_the_selection_back_into_view() {
+        let mut app = app_with_search_results(20);
+        for _ in 0..19 {
+            press_code(&mut app, KeyCode::Down);
+        }
+        for _ in 0..19 {
+            press_code(&mut app, KeyCode::Up);
+        }
+        assert_eq!(app.sat_input.as_ref().unwrap().offset, 0);
+    }
+
+    #[test]
+    fn a_click_beside_the_search_popup_on_a_result_row_is_ignored() {
+        let mut app = app_with_search_results(5);
+        let sat = app.config.sat;
+        let (_, y) = popup_row_pos(&app, 1);
+        click(&mut app, 0, y);
+        click(&mut app, 0, y);
+        assert_eq!(app.config.sat, sat);
+        assert!(app.sat_input.is_some());
+    }
+
+    #[test]
+    fn a_click_inside_the_search_popup_but_off_a_result_is_ignored() {
+        let mut app = app_with_search_results(5);
+        let sat = app.config.sat;
+        let (rect, _) = app.hit.popup.clone().unwrap();
+        // The input line, twice: no selection change, no double-click.
+        click(&mut app, rect.x + 4, rect.y + 2);
+        click(&mut app, rect.x + 4, rect.y + 2);
+        assert_eq!(app.config.sat, sat);
+        assert!(app.sat_input.is_some());
+        assert_eq!(app.sat_input.as_ref().unwrap().selected, 0);
+    }
+
+    #[test]
+    fn only_a_left_click_launches_the_egg() {
         let mut app = drawn_app_with_tracked();
         for kind in [
             MouseEventKind::Down(MouseButton::Right),
             MouseEventKind::Up(MouseButton::Left),
             MouseEventKind::Moved,
+            // The wheel is acted on now, but not by the badge.
             MouseEventKind::ScrollDown,
+            MouseEventKind::ScrollUp,
         ] {
             app.handle_mouse(MouseEvent { kind, column: 3, row: 0, modifiers: KeyModifiers::NONE });
         }
@@ -2778,7 +3110,7 @@ mod tests {
     }
 
     #[test]
-    fn the_input_thread_forwards_keys_and_left_clicks_but_drops_the_rest_of_the_mouse() {
+    fn the_input_thread_forwards_keys_clicks_and_the_wheel_but_drops_mouse_motion() {
         let mouse = |kind| {
             Event::Mouse(MouseEvent { kind, column: 0, row: 0, modifiers: KeyModifiers::NONE })
         };
@@ -2789,7 +3121,328 @@ mod tests {
         assert!(!forwards(&mouse(MouseEventKind::Moved)));
         assert!(!forwards(&mouse(MouseEventKind::Drag(MouseButton::Left))));
         assert!(!forwards(&mouse(MouseEventKind::Up(MouseButton::Left))));
-        assert!(!forwards(&mouse(MouseEventKind::ScrollUp)));
+        // A wheel notch is one deliberate act, like a keypress, so it is
+        // forwarded; sideways scroll has nothing to scroll and is not.
+        assert!(forwards(&mouse(MouseEventKind::ScrollUp)));
+        assert!(forwards(&mouse(MouseEventKind::ScrollDown)));
+        assert!(!forwards(&mouse(MouseEventKind::ScrollLeft)));
+        assert!(!forwards(&mouse(MouseEventKind::ScrollRight)));
+    }
+
+    /// The symbols down `rect`'s right border column in a drawn frame, top to
+    /// bottom — where a scrollbar, if there is one, shows.
+    fn border_column(buf: &ratatui::buffer::Buffer, rect: ratatui::layout::Rect) -> Vec<String> {
+        (rect.y..rect.bottom()).map(|y| buf[(rect.right() - 1, y)].symbol().to_string()).collect()
+    }
+
+    /// The centre of `panel`'s drawn rect, where a wheel notch is aimed.
+    fn centre(app: &App, panel: Panel) -> (u16, u16) {
+        let r = panel_rect(app, panel);
+        (r.x + r.width / 2, r.y + r.height / 2)
+    }
+
+    #[test]
+    fn a_wheel_notch_over_an_unfocused_tracked_panel_focuses_it_and_moves_the_selection() {
+        let mut app = drawn_app_with_six_tracked_and_the_active_one_last();
+        let (c, r) = centre(&app, Panel::Tracked);
+        assert_ne!(app.focus, Panel::Tracked);
+        // Focus seeds `list_pos` on the active satellite (index 5, the last), so
+        // scroll up from it: that is the direction with room to move.
+        mouse_at(&mut app, MouseEventKind::ScrollUp, c, r);
+        assert_eq!(app.focus, Panel::Tracked);
+        assert_eq!(app.list_pos, 5 - WHEEL_ROWS as usize);
+    }
+
+    #[test]
+    fn an_overflowing_tracked_list_wears_a_scrollbar_on_its_border_and_a_short_one_does_not() {
+        let bar_column = |app: &mut App| -> String {
+            let buf = draw_frame(app, 140, 40);
+            border_column(&buf, panel_rect(app, Panel::Tracked)).concat()
+        };
+        let mut six = drawn_app_with_six_tracked_and_the_active_one_last();
+        let col = bar_column(&mut six);
+        assert!(col.contains('▲') && col.contains('▼'), "six entries overflow: {col:?}");
+        let mut three = drawn_app_with_tracked();
+        let col = bar_column(&mut three);
+        assert!(!col.contains('▲') && !col.contains('▼'), "three fit: {col:?}");
+    }
+
+    #[test]
+    fn the_smallest_terminal_still_shows_that_an_overflowing_tracked_list_has_more() {
+        let mut app = drawn_app_with_six_tracked_and_the_active_one_last();
+        let buf = draw_frame(&mut app, 80, 24);
+        let r = panel_rect(&app, Panel::Tracked);
+        let col: Vec<&str> = (r.y + 1..r.bottom() - 1).map(|y| buf[(r.right() - 1, y)].symbol()).collect();
+        assert!(col.contains(&"█"), "TRACKED is {}x{} at 80x24: {col:?}", r.width, r.height);
+    }
+
+    /// The search popup's bar column, read down the popup's right border.
+    fn search_bar_column(app: &mut App) -> Vec<String> {
+        let buf = draw_frame(app, 140, 40);
+        border_column(&buf, app.hit.popup.clone().unwrap().0)
+    }
+
+    #[test]
+    fn the_search_popups_scrollbar_spans_only_its_result_rows() {
+        let mut app = app_with_search_results(20);
+        let (rect, spans) = app.hit.popup.clone().unwrap();
+        let col = search_bar_column(&mut app);
+        let (top, bottom) = (spans[0].0, spans[spans.len() - 1].0);
+        assert_eq!(col[(top - rect.y) as usize], "▲", "the arrow opens the results: {col:?}");
+        assert_eq!(col[(bottom - rect.y) as usize], "▼", "and closes them: {col:?}");
+        assert!(col[..(top - rect.y) as usize].iter().all(|s| s != "█" && s != "║"), "{col:?}");
+    }
+
+    #[test]
+    fn the_search_popups_thumb_moves_to_the_bottom_as_the_wheel_scrolls_to_the_last_result() {
+        let mut app = app_with_search_results(20);
+        let (rect, spans) = app.hit.popup.clone().unwrap();
+        for _ in 0..10 {
+            mouse_at(&mut app, MouseEventKind::ScrollDown, 5, 5);
+        }
+        let col = search_bar_column(&mut app);
+        let last = (spans[spans.len() - 1].0 - rect.y) as usize;
+        assert_eq!(col[last - 1], "█", "the thumb ends against the ▼: {col:?}");
+    }
+
+    #[test]
+    fn the_search_popup_draws_no_scrollbar_when_every_result_fits() {
+        let mut app = app_with_search_results(5);
+        let col = search_bar_column(&mut app);
+        assert!(col.iter().all(|s| s != "▲" && s != "▼" && s != "█"), "{col:?}");
+        let mut full = app_with_search_results(SEARCH_VISIBLE);
+        let col = search_bar_column(&mut full);
+        assert!(col.iter().all(|s| s != "▲" && s != "▼" && s != "█"), "exactly a page: {col:?}");
+    }
+
+    #[test]
+    fn a_wheel_notch_moves_a_focused_list_by_three_rows_and_clamps_at_both_ends() {
+        let mut app = drawn_app_with_six_tracked_and_the_active_one_last();
+        press(&mut app, '2');
+        let (c, r) = centre(&app, Panel::Tracked);
+        app.list_pos = 0;
+        mouse_at(&mut app, MouseEventKind::ScrollDown, c, r);
+        assert_eq!(app.list_pos, 3);
+        mouse_at(&mut app, MouseEventKind::ScrollDown, c, r);
+        assert_eq!(app.list_pos, 5, "clamped to the last of six rows, not 6");
+        mouse_at(&mut app, MouseEventKind::ScrollUp, c, r);
+        mouse_at(&mut app, MouseEventKind::ScrollUp, c, r);
+        assert_eq!(app.list_pos, 0, "and to the first, not below it");
+    }
+
+    #[test]
+    fn a_wheel_notch_over_a_panel_with_no_list_neither_focuses_it_nor_scrolls_anything() {
+        let mut app = drawn_app_with_tracked();
+        press(&mut app, '2');
+        app.list_pos = 1;
+        for panel in [Panel::Map, Panel::Telemetry, Panel::Weather] {
+            let (c, r) = centre(&app, panel);
+            mouse_at(&mut app, MouseEventKind::ScrollDown, c, r);
+            assert_eq!(app.focus, Panel::Tracked, "{panel:?} must not take focus");
+            assert_eq!(app.list_pos, 1, "{panel:?} must not move the tracked selection");
+        }
+    }
+
+    #[test]
+    fn a_wheel_notch_outside_every_panel_does_nothing() {
+        let mut app = drawn_app_with_tracked();
+        press(&mut app, '2');
+        app.list_pos = 1;
+        // Row 0 is the title bar, which belongs to no panel.
+        mouse_at(&mut app, MouseEventKind::ScrollDown, 60, 0);
+        assert_eq!(app.list_pos, 1);
+    }
+
+    #[test]
+    fn the_wheel_scrolls_the_search_popup_past_its_window_wherever_the_pointer_is() {
+        let mut app = app_with_search_results(20);
+        app.set_focus(Panel::Map);
+        // Aimed at the TRACKED panel behind the popup, not at the popup.
+        let (c, r) = centre(&app, Panel::Tracked);
+        for _ in 0..3 {
+            mouse_at(&mut app, MouseEventKind::ScrollDown, c, r);
+        }
+        let p = app.sat_input.as_ref().unwrap();
+        assert_eq!(p.selected, 9);
+        assert!(p.offset > 0, "the window followed the selection off the first page");
+        assert!(p.selected < p.offset + SEARCH_VISIBLE, "and the selection is on it");
+        assert_eq!(app.focus, Panel::Map, "the panel behind the popup was not touched");
+        for _ in 0..10 {
+            mouse_at(&mut app, MouseEventKind::ScrollDown, c, r);
+        }
+        assert_eq!(app.sat_input.as_ref().unwrap().selected, 19, "clamped to the last result");
+        for _ in 0..10 {
+            mouse_at(&mut app, MouseEventKind::ScrollUp, c, r);
+        }
+        let p = app.sat_input.as_ref().unwrap();
+        assert_eq!((p.selected, p.offset), (0, 0), "and back to the top");
+    }
+
+    #[test]
+    fn the_wheel_in_a_search_popup_with_no_results_does_nothing() {
+        let mut app = drawn_app_with_tracked();
+        press(&mut app, 's');
+        mouse_at(&mut app, MouseEventKind::ScrollDown, 5, 5);
+        assert_eq!(app.sat_input.as_ref().unwrap().selected, 0);
+    }
+
+    /// A drawn app with the `T` popup open on `n` downlinks described
+    /// `downlink <i>`, the way a SatNOGS lookup leaves it.
+    fn app_with_transmitters(n: u64) -> App {
+        let mut app = drawn_app_with_tracked();
+        if let Ok(mut d) = app.data.write() {
+            d.tx_lookup = TransmitterState::Done {
+                norad_id: app.config.sat,
+                found: (0..n)
+                    .map(|i| crate::config::Transmitter {
+                        downlink_hz: 145_800_000 + i * 1000,
+                        mode: "FM".to_string(),
+                        description: format!("downlink {i}"),
+                    })
+                    .collect(),
+            };
+        }
+        app.tx_input = Some(TxPicker::default());
+        draw_frame(&mut app, 140, 40);
+        app
+    }
+
+    #[test]
+    fn follow_moves_the_window_only_when_the_selection_leaves_it() {
+        assert_eq!(follow(3, 0, 8), 0, "inside the window: it stays put");
+        assert_eq!(follow(7, 0, 8), 0, "the last visible row is still inside");
+        assert_eq!(follow(8, 0, 8), 1, "one past the bottom: scroll just enough");
+        assert_eq!(follow(2, 5, 8), 2, "above the top: the window snaps to it");
+    }
+
+    #[test]
+    fn the_transmitter_picker_window_follows_the_selection_and_shows_the_selected_row() {
+        let mut app = app_with_transmitters(15);
+        for _ in 0..12 {
+            press_code(&mut app, KeyCode::Down);
+        }
+        let p = app.tx_input.as_ref().unwrap();
+        assert_eq!((p.selected, p.offset), (12, 12 + 1 - TX_VISIBLE));
+        let buf = draw_frame(&mut app, 140, 40);
+        let screen: String = buf.content().iter().map(|c| c.symbol()).collect();
+        assert!(screen.contains("downlink 12"), "the selected row is on screen");
+        assert!(!screen.contains("downlink 0 "), "and the first page has scrolled off");
+        for _ in 0..12 {
+            press_code(&mut app, KeyCode::Up);
+        }
+        let p = app.tx_input.as_ref().unwrap();
+        assert_eq!((p.selected, p.offset), (0, 0), "and it scrolls back up with it");
+    }
+
+    #[test]
+    fn the_wheel_clamps_the_transmitter_picker_at_both_ends() {
+        let mut app = app_with_transmitters(10);
+        mouse_at(&mut app, MouseEventKind::ScrollDown, 5, 5);
+        assert_eq!(app.tx_input.as_ref().unwrap().selected, 3);
+        for _ in 0..5 {
+            mouse_at(&mut app, MouseEventKind::ScrollDown, 5, 5);
+        }
+        assert_eq!(app.tx_input.as_ref().unwrap().selected, 9, "clamped to the last downlink");
+        for _ in 0..5 {
+            mouse_at(&mut app, MouseEventKind::ScrollUp, 5, 5);
+        }
+        assert_eq!(app.tx_input.as_ref().unwrap().selected, 0, "and to the first");
+    }
+
+    #[test]
+    fn the_transmitter_popups_row_spans_sit_on_the_lines_that_hold_those_downlinks() {
+        // Pins the one-line-per-row assumption, as for the search popup: a
+        // wrapped row would put every span below it off by one.
+        let mut app = app_with_transmitters(15);
+        let buf = draw_frame(&mut app, 140, 40);
+        let (_, spans) = app.hit.popup.clone().unwrap();
+        assert_eq!(spans.len(), TX_VISIBLE);
+        for (y0, _, index) in spans {
+            let line: String = (0..buf.area.width).map(|x| buf[(x, y0)].symbol().to_string()).collect();
+            assert!(line.contains(&format!("downlink {index}")), "row {y0}: {line:?}");
+        }
+    }
+
+    #[test]
+    fn clicking_a_transmitter_row_selects_it_without_moving_the_window() {
+        let mut app = app_with_transmitters(15);
+        app.tx_input.as_mut().unwrap().offset = 3;
+        draw_frame(&mut app, 140, 40);
+        let (x, y) = popup_row_pos(&app, 9);
+        click(&mut app, x, y);
+        let p = app.tx_input.as_ref().unwrap();
+        assert_eq!(p.selected, 9);
+        assert_eq!(p.offset, 3, "the window must not slide under the pointer");
+        assert!(app.tx_input.is_some(), "one click only selects");
+    }
+
+    #[test]
+    fn double_clicking_a_transmitter_row_picks_that_downlink_and_closes_the_popup() {
+        let mut app = app_with_transmitters(5);
+        let (x, y) = popup_row_pos(&app, 2);
+        click(&mut app, x, y);
+        click(&mut app, x, y);
+        let sat = app.config.sat;
+        assert_eq!(app.config.active_transmitter(sat).map(|t| t.downlink_hz), Some(145_802_000));
+        assert!(app.tx_input.is_none());
+    }
+
+    #[test]
+    fn a_click_outside_the_transmitter_popup_does_not_reach_the_dashboard() {
+        let mut app = app_with_transmitters(5);
+        click(&mut app, 3, 0);
+        assert!(app.egg.is_none(), "the popup swallows a click on the badge");
+        assert!(app.tx_input.is_some(), "and a stray click does not close it");
+    }
+
+    #[test]
+    fn a_wheel_notch_with_the_help_overlay_open_scrolls_it_and_leaves_the_list_alone() {
+        let mut app = drawn_app_with_tracked();
+        press(&mut app, '2');
+        app.list_pos = 1;
+        press(&mut app, '?');
+        let (c, r) = centre(&app, Panel::Tracked);
+        mouse_at(&mut app, MouseEventKind::ScrollDown, c, r);
+        assert_eq!(app.help_scroll, WHEEL_ROWS as u16);
+        assert_eq!(app.list_pos, 1);
+        for _ in 0..3 {
+            mouse_at(&mut app, MouseEventKind::ScrollUp, c, r);
+        }
+        assert_eq!(app.help_scroll, 0, "saturates at the top rather than wrapping");
+    }
+
+    #[test]
+    fn a_wheel_notch_between_two_clicks_on_a_row_breaks_the_double_click() {
+        let mut app = drawn_app_with_tracked();
+        let first = app.hit.rows.iter().find(|r| r.0 == Panel::Tracked).unwrap().clone();
+        let r = panel_rect(&app, Panel::Tracked);
+        let sat = app.config.sat;
+        click(&mut app, r.x + 3, first.1);
+        mouse_at(&mut app, MouseEventKind::ScrollDown, r.x + 3, first.1);
+        draw_frame(&mut app, 140, 40);
+        click(&mut app, r.x + 3, first.1);
+        assert_eq!(app.config.sat, sat, "a fresh first click, not the second of a pair");
+        click(&mut app, r.x + 3, first.1);
+        assert_ne!(app.config.sat, sat, "but two clicks in a row still do track it");
+    }
+
+    #[test]
+    fn a_wheel_notch_skips_the_boot_splash_like_any_key() {
+        let mut config = Config::default();
+        config.ui.splash = Duration::from_secs(10);
+        let mut app = test_app(config);
+        app.splash_skipped = false;
+        assert!(app.splash_active());
+        mouse_at(&mut app, MouseEventKind::ScrollDown, 5, 5);
+        assert!(app.splash_skipped);
+    }
+
+    #[test]
+    fn step_index_clamps_into_the_list_and_survives_an_empty_one() {
+        assert_eq!(step_index(4, 3, 6), 5);
+        assert_eq!(step_index(1, -3, 6), 0);
+        assert_eq!(step_index(99, -3, 6), 5, "a stale position past the end still lands inside");
+        assert_eq!(step_index(0, 3, 0), 0);
     }
 
     #[test]

@@ -10,6 +10,7 @@ mod hit;
 mod map;
 mod panels;
 mod places;
+mod scroll;
 mod skyplot;
 mod splash;
 mod stars;
@@ -262,17 +263,17 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
     }
 
     if let Some(picker) = &app.sat_input {
-        sat_input_popup(frame, area, picker, &data.search);
+        hit.popup = Some(sat_input_popup(frame, area, picker, &data.search));
     }
     if let Some(picker) = &app.tx_input {
-        transmitter_popup(
+        hit.popup = Some(transmitter_popup(
             frame,
             area,
             picker,
             &data.tx_lookup,
             app.config.sat,
             app.config.active_transmitter(app.config.sat),
-        );
+        ));
     }
     if let Some(input) = &app.time_input {
         time_input_popup(frame, area, input);
@@ -751,15 +752,29 @@ pub(crate) fn selected_pass(app: &App, now: DateTime<Utc>) -> Option<Highlight<'
     Some(Highlight { pass: &passes[index], index, total })
 }
 
-fn sat_input_popup(frame: &mut Frame, area: Rect, picker: &crate::app::SatPicker, search: &SearchState) {
+/// Draws the popup and returns its rect with the screen rows its visible
+/// result lines landed on, for [`HitMap::search`]. The spans are emitted from
+/// the same loop that builds the lines, so they can't drift from the scroll
+/// window; that they map one line to one screen row rests on nothing above
+/// the results wrapping at the popup's 76-column interior (pinned by a test).
+fn sat_input_popup(
+    frame: &mut Frame,
+    area: Rect,
+    picker: &crate::app::SatPicker,
+    search: &SearchState,
+) -> (Rect, Vec<hit::RowSpan>) {
     // Sized generously (and left fixed regardless of what's showing, so the
     // box doesn't resize under the user's fingers) to survive line-wrapping
     // in both a full page of results and a long error message.
-    let popup = centered(area, 78, 13);
+    let popup = centered(area, 78, crate::app::SEARCH_VISIBLE as u16 + 5);
     frame.render_widget(Clear, popup);
+    let mut spans: Vec<hit::RowSpan> = Vec::new();
     let block = Block::bordered()
         .border_style(Style::new().fg(Theme::FRAME_FOCUS))
         .title(" track satellite ");
+    // Where the results arm below leaves the window, for the scrollbar drawn
+    // once the popup is: the first result shown and the result count.
+    let (mut first, mut total) = (0, 0);
     let mut lines = vec![
         Line::from(""),
         Line::from(vec![
@@ -790,14 +805,17 @@ fn sat_input_popup(frame: &mut Frame, area: Rect, picker: &crate::app::SatPicker
             // Rows above `lines` already used: a blank line, the input line,
             // another blank. A broad query (e.g. "STARLINK") can return up
             // to 20 results, more than the fixed popup height shows at
-            // once — scroll the window to keep the selected row visible
-            // rather than letting it run off the bottom unseen.
-            let visible = (popup.height as usize).saturating_sub(2 + 3).max(1);
+            // once, so the window scrolls — but by `picker.offset`, which the
+            // key handlers keep on the selection, not by a start recomputed
+            // from it here: that would slide the list under a click.
+            let visible = crate::app::SEARCH_VISIBLE;
             let selected = picker.selected.min(results.len().saturating_sub(1));
-            let start = selected
-                .saturating_sub(visible.saturating_sub(1))
-                .min(results.len().saturating_sub(visible));
+            let start = picker.offset.min(results.len().saturating_sub(visible));
+            (first, total) = (start, results.len());
             for (i, m) in results.iter().enumerate().skip(start).take(visible) {
+                // +1 for the popup's top border.
+                let y = popup.y + 1 + lines.len() as u16;
+                spans.push((y, y + 1, i));
                 let is_selected = i == selected;
                 let marker = if is_selected { "▶ " } else { "  " };
                 let style = if is_selected { panels::row_highlight() } else { Style::new().fg(Theme::VALUE) };
@@ -822,13 +840,23 @@ fn sat_input_popup(frame: &mut Frame, area: Rect, picker: &crate::app::SatPicker
         Paragraph::new(lines).block(block).wrap(Wrap { trim: false }),
         popup,
     );
+    if let Some(&(y, _, _)) = spans.first() {
+        scroll::band(frame, popup, y, first, spans.len(), total);
+    }
+    (popup, spans)
 }
 
 /// The `T` picker: choose which SatNOGS downlink drives the DOPP row. Shares
-/// only `centered`, `Clear` and the focus-frame block with `sat_input_popup`;
-/// the scroll-window arithmetic below is a deliberate second copy, because the
-/// two lists differ in what their rows show and where they come from
-/// (ui/mod.rs already keeps `time_input_popup` separate for the same reason).
+/// `centered`, `Clear` and the focus-frame block with `sat_input_popup`, and
+/// like it scrolls by a stored `picker.offset` over a fixed-size window
+/// (`TX_VISIBLE`); the row text is its own, because the two lists differ in what
+/// their rows show and where they come from (ui/mod.rs already keeps
+/// `time_input_popup` separate for the same reason).
+///
+/// Returns its rect with the screen rows its visible downlinks landed on, for
+/// [`HitMap::popup`], built by the same loop as the lines exactly as
+/// `sat_input_popup` does. One line per row holds because each is 71 columns
+/// against the 76-column interior (pinned by a test).
 fn transmitter_popup(
     frame: &mut Frame,
     area: Rect,
@@ -836,8 +864,9 @@ fn transmitter_popup(
     lookup: &TransmitterState,
     sat: u64,
     active: Option<&crate::config::Transmitter>,
-) {
-    let popup = centered(area, 78, 13);
+) -> (Rect, Vec<hit::RowSpan>) {
+    // A blank line, the window, and the two borders.
+    let popup = centered(area, 78, crate::app::TX_VISIBLE as u16 + 3);
     frame.render_widget(Clear, popup);
     let block = Block::bordered()
         .border_style(Style::new().fg(Theme::FRAME_FOCUS))
@@ -845,6 +874,10 @@ fn transmitter_popup(
     let dim = |s: String| Line::from(Span::styled(s, Style::new().fg(Theme::LABEL)));
     let alert = |s: String| Line::from(Span::styled(s, Style::new().fg(Theme::ALERT)));
     let mut lines = vec![Line::from("")];
+    // Where the list arm leaves the window, for the scrollbar drawn once the
+    // popup is: the first downlink shown and the downlink count.
+    let (mut first, mut total) = (0, 0);
+    let mut spans: Vec<hit::RowSpan> = Vec::new();
 
     match lookup {
         TransmitterState::Idle | TransmitterState::Busy { .. } => {
@@ -861,12 +894,14 @@ fn transmitter_popup(
             ));
         }
         TransmitterState::Done { found, .. } => {
-            let visible = (popup.height as usize).saturating_sub(2 + 1).max(1);
+            let visible = crate::app::TX_VISIBLE;
             let selected = picker.selected.min(found.len().saturating_sub(1));
-            let start = selected
-                .saturating_sub(visible.saturating_sub(1))
-                .min(found.len().saturating_sub(visible));
+            let start = picker.offset.min(found.len().saturating_sub(visible));
+            (first, total) = (start, found.len());
             for (i, t) in found.iter().enumerate().skip(start).take(visible) {
+                // +1 for the popup's top border, as in `sat_input_popup`.
+                let y = popup.y + 1 + lines.len() as u16;
+                spans.push((y, y + 1, i));
                 let is_selected = i == selected;
                 // `●` marks the one already driving the DOPP row — the same
                 // pairing of `▶`/`●` the TRACKED panel uses for its list.
@@ -895,6 +930,10 @@ fn transmitter_popup(
     // `{sel}{act} ` gutter is load-bearing whitespace, not padding, and a
     // trimming wrapper strips it off every unselected row.
     frame.render_widget(Paragraph::new(lines).block(block).wrap(Wrap { trim: false }), popup);
+    if let Some(&(y, _, _)) = spans.first() {
+        scroll::band(frame, popup, y, first, spans.len(), total);
+    }
+    (popup, spans)
 }
 
 /// The `g` prompt: a small centred box that takes a time or an offset. Shares

@@ -151,7 +151,7 @@ Two more timings — nothing to do with the network — are set under `[ui]` in
 [ui]
 aos_lead = "30s"  # how far ahead of AOS a pass counts as imminent
 splash = "3s"     # how long the boot splash stays up
-mouse = true      # capture the mouse, so a click can focus a panel or select a row
+mouse = true      # capture the mouse, so a click can focus a panel or select a row, and the wheel scroll
 ```
 
 `aos_lead` is also what `n`/`N` (jump to the next pass) land the clock on, so
@@ -164,8 +164,18 @@ its range is raised or lowered and noted in the activity log, the same policy
 
 By default nadir captures the mouse: clicking a panel focuses it, and clicking a
 row in Tracked, Passes or Launches selects it, exactly as `j`/`k` would;
-double-clicking a Tracked entry starts tracking it, like `Enter`. The cost
-is that the terminal's own click-drag text selection is off while nadir is
+double-clicking a Tracked entry starts tracking it, like `Enter`. In the `s`
+search popup, clicking a result highlights it and double-clicking tracks it; in the
+`T` popup, clicking a downlink highlights it and double-clicking tunes to it, like `Enter`.
+
+The scroll wheel moves three rows a notch, like `j`/`k` three times: over Tracked,
+Passes or Launches it scrolls that list (focusing the panel first, as a click
+would); with the `s` or `T` popup or the `?` overlay open it scrolls that instead,
+wherever the pointer is. Over the map, Telemetry or Space Weather it does nothing.
+A list with more rows than its panel shows draws a scrollbar (`▲ █ ║ ▼`) on its
+right border, so you can tell there is more to scroll to.
+
+The cost of capture is that the terminal's own click-drag text selection is off while nadir is
 running — hold `Shift` while dragging to select text anyway, which every modern
 terminal honours. If you'd rather never think about it, set `mouse = false` under
 `[ui]` and nadir won't capture the mouse at all; everything stays reachable from
@@ -229,7 +239,8 @@ and will not work here.
 | `n` / `N` | jump to `aos_lead` before the next pass / next naked-eye pass, paused there |
 | `g` | go to a time — `2026-09-08 04:30`, `04:30`, or an offset like `+90m` |
 | `0` | snap the clock back to now, running at 1× |
-| click | focus the panel under the pointer; on Tracked, Passes or Launches, select the row; double-click a Tracked entry to track it (needs mouse capture — see [below](#mouse)) |
+| click | focus the panel under the pointer; on Tracked, Passes or Launches, select the row; double-click a Tracked entry, or a result in the `s` popup, to track it, or a downlink in the `T` popup to tune to it (needs mouse capture — see [below](#mouse)) |
+| scroll wheel | scroll the list under the pointer (Tracked, Passes, Launches), or the `s` / `T` popup or `?` overlay when one is open — three rows a notch (needs mouse capture) |
 | `?` | help — a scrollable in-app reference to every field, symbol and status chip |
 | `q` / `Esc` / `Ctrl+C` | quit — `Ctrl+C` works from anywhere, including inside a prompt |
 
@@ -262,8 +273,8 @@ paused, `▸▸60x` / `◂◂5x` warp) whenever it is not live, so the display c
 quietly claim to be current when it isn't — and, when the bar is wide enough,
 the offset from now beside it (`Δ+2h14m`, `Δ-45m`, `Δ+3d`).
 
-While the `?` overlay is open, `j`/`k`/`PgUp`/`PgDn`/`Home`/`End` scroll it
-instead, and `?` or `Esc` closes it.
+While the `?` overlay is open, `j`/`k`/`PgUp`/`PgDn`/`Home`/`End` (or the scroll
+wheel) scroll it instead, and `?` or `Esc` closes it.
 
 ## Reading the dashboard
 

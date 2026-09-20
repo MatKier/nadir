@@ -123,7 +123,7 @@ pub fn draw(
                     }
                 })
                 .collect();
-            rows = render_list(frame, launch_area, launch_area, items, selected, |list| {
+            rows = render_list(frame, area, launch_area, launch_area, items, selected, |list| {
                 list.highlight_style(row_highlight())
             });
         }

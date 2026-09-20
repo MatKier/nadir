@@ -204,7 +204,7 @@ pub struct Ui {
     #[serde(default = "default_splash", with = "interval_str")]
     pub splash: Duration,
     /// Whether nadir captures the mouse, so a click can focus a panel or
-    /// select a list row. Capture costs the terminal's native click-drag text
+    /// select a list row and the wheel can scroll one. Capture costs the terminal's native click-drag text
     /// selection (Shift-drag still works in every modern terminal) — and this
     /// is a dashboard full of NORAD ids, coordinates and frequencies someone
     /// may want to copy — which is why it is a knob rather than a constant.

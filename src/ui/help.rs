@@ -54,6 +54,13 @@ pub fn draw(frame: &mut Frame, area: Rect, app: &mut App) {
             .wrap(Wrap { trim: false }),
         popup,
     );
+    crate::ui::scroll::vertical(
+        frame,
+        popup,
+        app.help_scroll as usize,
+        visible as usize,
+        total as usize,
+    );
 }
 
 fn content(app: &App) -> Vec<Line<'static>> {
@@ -87,7 +94,10 @@ fn content(app: &App) -> Vec<Line<'static>> {
     row(&mut l, "t", "step to the next configured downlink (drives the DOPP row)");
     row(&mut l, "T", "pick a downlink / look one up on SatNOGS DB for this satellite");
     row(&mut l, "click", "focus the panel under the pointer; on a list, select the row");
-    text(&mut l, "     double-click a Tracked entry to start tracking it");
+    text(&mut l, "     double-click a Tracked entry, or a search result, to track it,");
+    text(&mut l, "     or a downlink in the `T` popup to tune to it (same as Enter)");
+    row(&mut l, "scroll wheel", "scroll the list under the pointer, or the open popup or help");
+    text(&mut l, "     three rows a notch; a scrollbar (▲ █ ║ ▼) on a border means more rows");
     text(&mut l, "     Shift+drag still selects text; `[ui] mouse = false` turns capture off");
     row(&mut l, "?", "toggle this help");
     row(&mut l, "q / Esc", "quit (Esc closes this help first)");

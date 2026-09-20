@@ -49,6 +49,12 @@ pub struct HitMap {
     /// list. A row can span more than one screen row — the highlighted Launches
     /// entry expands to two lines.
     pub rows: Vec<(Panel, u16, u16, usize)>,
+    /// The open list popup's visible rows — the `s` search results or the `T`
+    /// downlinks — with the popup's own rect: the x-bound `rows` gets from
+    /// `panel_at`, which a modal has no panel for. One slot serves both because
+    /// the modals never overlap, and the map is rebuilt every frame so a stale
+    /// entry can't outlive its popup; `App` knows which picker a row belongs to.
+    pub popup: Option<(Rect, Vec<RowSpan>)>,
 }
 
 impl HitMap {
@@ -86,6 +92,21 @@ impl HitMap {
     }
 }
 
+impl HitMap {
+    /// The popup row under `(col, row)`. `None` when the popup isn't up,
+    /// or the click is outside it, or on one of its non-result rows. The rect
+    /// is checked first for the same reason `row_at` resolves a panel first: a
+    /// span is only a y-range, so a click beside the popup on a result's
+    /// screen row must not count.
+    pub(crate) fn popup_row_at(&self, col: u16, row: u16) -> Option<usize> {
+        let (rect, spans) = self.popup.as_ref()?;
+        if !rect.contains(Position::new(col, row)) {
+            return None;
+        }
+        spans.iter().find(|(y0, y1, _)| (*y0..*y1).contains(&row)).map(|(_, _, i)| *i)
+    }
+}
+
 /// The screen rows each *visible* list item occupies, as `(y0, y1, index)`,
 /// given every item's height, the list's scroll `offset` and the `inner` rect
 /// it was rendered into.
@@ -112,16 +133,23 @@ pub(crate) fn list_rows(heights: &[usize], offset: usize, inner: Rect) -> Vec<Ro
     out
 }
 
-/// Render `items` as a stateful list into `area` and return the rows it
-/// painted inside `inner`, for [`HitMap::add_rows`]. `style` applies the
-/// panel's own block, highlight style and symbol to the bare `List`.
+/// Render `items` as a stateful list into `area`, return the rows it painted
+/// inside `inner` for [`HitMap::add_rows`], and draw its scrollbar over the
+/// right border of `outer` — the panel's whole rect, block included. The three
+/// rects differ per panel (NEXT PASSES and LAUNCHES draw their block first and
+/// hand the list its inner rect; TRACKED lets the `List` draw the block), which
+/// is why `outer` is spelled out rather than derived from `area`. `style`
+/// applies the panel's own block, highlight style and symbol to the bare `List`.
 ///
 /// The one place the render-then-read-offset order lives: item heights are
 /// taken before `List::new` consumes the items, and the offset is read from the
 /// kept `ListState` only after rendering, when ratatui has scrolled it to keep
-/// the selection in view (see [`list_rows`]).
+/// the selection in view (see [`list_rows`]). The scrollbar reads the same
+/// spans, so it can never disagree with the rows, and a list panel cannot
+/// forget to draw one.
 pub(crate) fn render_list<'a>(
     frame: &mut Frame,
+    outer: Rect,
     area: Rect,
     inner: Rect,
     items: Vec<ListItem<'a>>,
@@ -131,7 +159,9 @@ pub(crate) fn render_list<'a>(
     let heights: Vec<usize> = items.iter().map(ListItem::height).collect();
     let mut state = ListState::default().with_selected(selected);
     frame.render_stateful_widget(style(List::new(items)), area, &mut state);
-    list_rows(&heights, state.offset(), inner)
+    let rows = list_rows(&heights, state.offset(), inner);
+    crate::ui::scroll::for_rows(frame, outer, &rows, heights.len());
+    rows
 }
 
 #[cfg(test)]
@@ -206,7 +236,7 @@ mod tests {
         let mut terminal = Terminal::new(TestBackend::new(20, 5)).unwrap();
         let mut spans = Vec::new();
         terminal
-            .draw(|f| spans = render_list(f, area, area, items(), Some(5), |l| l))
+            .draw(|f| spans = render_list(f, area, area, area, items(), Some(5), |l| l))
             .unwrap();
         let buf = terminal.backend().buffer();
         assert!(spans.len() >= 2 && spans[0].2 > 0, "the list scrolled: {spans:?}");
@@ -223,6 +253,7 @@ mod tests {
                 (Rect::new(40, 1, 40, 10), Panel::Tracked),
             ],
             rows: vec![(Panel::Tracked, 2, 3, 0), (Panel::Tracked, 3, 4, 1)],
+            popup: Some((Rect::new(10, 5, 30, 8), vec![(8, 9, 4), (9, 10, 5)])),
         }
     }
 
@@ -250,5 +281,29 @@ mod tests {
     fn row_at_ignores_a_click_beside_the_panel_on_a_row_the_panel_owns() {
         // Same screen row as TRACKED's first entry, but in the map's columns.
         assert_eq!(map().row_at(5, 2), None);
+    }
+
+    #[test]
+    fn popup_row_at_finds_the_result_under_the_click() {
+        let m = map();
+        assert_eq!(m.popup_row_at(12, 8), Some(4));
+        assert_eq!(m.popup_row_at(12, 9), Some(5));
+    }
+
+    #[test]
+    fn popup_row_at_ignores_a_click_beside_the_popup_on_a_row_it_owns() {
+        assert_eq!(map().popup_row_at(2, 8), None);
+        assert_eq!(map().popup_row_at(45, 8), None);
+    }
+
+    #[test]
+    fn popup_row_at_ignores_the_popup_rows_that_are_not_results() {
+        assert_eq!(map().popup_row_at(12, 6), None, "the input line");
+        assert_eq!(map().popup_row_at(12, 11), None, "below the last result");
+    }
+
+    #[test]
+    fn popup_row_at_is_empty_when_the_popup_is_not_up() {
+        assert_eq!(HitMap::default().popup_row_at(12, 8), None);
     }
 }
