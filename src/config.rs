@@ -203,6 +203,14 @@ pub struct Ui {
     /// takes over on its own — any keypress or `--no-splash` skips it sooner.
     #[serde(default = "default_splash", with = "interval_str")]
     pub splash: Duration,
+    /// Whether nadir captures the mouse, so a click can focus a panel or
+    /// select a list row. Capture costs the terminal's native click-drag text
+    /// selection (Shift-drag still works in every modern terminal) — and this
+    /// is a dashboard full of NORAD ids, coordinates and frequencies someone
+    /// may want to copy — which is why it is a knob rather than a constant.
+    /// A plain flag, so unlike its neighbours it has no range to clamp.
+    #[serde(default = "default_mouse")]
+    pub mouse: bool,
 }
 
 fn default_aos_lead() -> Duration {
@@ -211,10 +219,13 @@ fn default_aos_lead() -> Duration {
 fn default_splash() -> Duration {
     Duration::from_secs(3)
 }
+fn default_mouse() -> bool {
+    true
+}
 
 impl Default for Ui {
     fn default() -> Self {
-        Self { aos_lead: default_aos_lead(), splash: default_splash() }
+        Self { aos_lead: default_aos_lead(), splash: default_splash(), mouse: default_mouse() }
     }
 }
 
@@ -259,6 +270,7 @@ impl Ui {
         let clamped = Self {
             aos_lead: clamp(self.aos_lead, Self::AOS_LEAD_MIN, Self::AOS_LEAD_MAX, "AOS lead"),
             splash: clamp(self.splash, Self::SPLASH_MIN, Self::SPLASH_MAX, "splash duration"),
+            mouse: self.mouse,
         };
         (clamped, notes)
     }
@@ -937,7 +949,11 @@ mod tests {
     #[test]
     fn a_ui_table_round_trips_through_toml() {
         let mut c = Config::default();
-        c.ui = Ui { aos_lead: Duration::from_secs(45), splash: Duration::from_secs(5) };
+        c.ui = Ui {
+            aos_lead: Duration::from_secs(45),
+            splash: Duration::from_secs(5),
+            mouse: false,
+        };
         let text = toml::to_string_pretty(&c).unwrap();
         let back: Config = toml::from_str(&text).unwrap();
         assert_eq!(back.ui, c.ui);
@@ -958,7 +974,11 @@ mod tests {
 
     #[test]
     fn ui_clamped_raises_a_too_short_value_to_its_floor_and_reports_it() {
-        let eager = Ui { aos_lead: Duration::from_secs(1), splash: Duration::from_millis(500) };
+        let eager = Ui {
+            aos_lead: Duration::from_secs(1),
+            splash: Duration::from_millis(500),
+            ..Ui::default()
+        };
         let (out, notes) = eager.clamped();
         assert_eq!(out.aos_lead, Ui::AOS_LEAD_MIN);
         assert_eq!(out.splash, Ui::SPLASH_MIN);
@@ -968,12 +988,35 @@ mod tests {
 
     #[test]
     fn ui_clamped_lowers_a_too_long_value_to_its_ceiling_and_reports_it() {
-        let lazy = Ui { aos_lead: Duration::from_secs(3600), splash: Duration::from_secs(120) };
+        let lazy = Ui {
+            aos_lead: Duration::from_secs(3600),
+            splash: Duration::from_secs(120),
+            ..Ui::default()
+        };
         let (out, notes) = lazy.clamped();
         assert_eq!(out.aos_lead, Ui::AOS_LEAD_MAX);
         assert_eq!(out.splash, Ui::SPLASH_MAX);
         assert_eq!(notes.len(), 2, "one line per value lowered");
         assert!(notes.iter().any(|n| n.contains("splash duration") && n.contains("lowered")));
+    }
+
+    #[test]
+    fn the_mouse_setting_defaults_to_on_and_can_be_turned_off_in_the_ui_table() {
+        assert!(Ui::default().mouse, "capture is on unless the user opts out");
+        let c: Config = toml::from_str("[ui]\nmouse = false\n").unwrap();
+        assert!(!c.ui.mouse);
+        // Turning it off must not disturb the timings sharing the table.
+        assert_eq!(c.ui.splash, Ui::default().splash);
+    }
+
+    #[test]
+    fn ui_clamped_carries_the_mouse_setting_through() {
+        // `clamped` rebuilds `Self` from an exhaustive literal, so adding a
+        // field without deciding its fate here is a compile error. What this
+        // pins is the decision that was made: copied through untouched.
+        let (out, notes) = Ui { mouse: false, ..Ui::default() }.clamped();
+        assert!(!out.mouse);
+        assert!(notes.is_empty(), "a bool has no range, so it never logs an adjustment");
     }
 
     #[test]

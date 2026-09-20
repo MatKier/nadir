@@ -151,6 +151,7 @@ Two more timings — nothing to do with the network — are set under `[ui]` in
 [ui]
 aos_lead = "30s"  # how far ahead of AOS a pass counts as imminent
 splash = "3s"     # how long the boot splash stays up
+mouse = true      # capture the mouse, so a click can focus a panel or select a row
 ```
 
 `aos_lead` is also what `n`/`N` (jump to the next pass) land the clock on, so
@@ -158,6 +159,17 @@ the two always agree — pressing `n` always arrives exactly where the "AOS in�
 countdown starts. It's clamped to 5s–10m; `splash` to 1s–30s. A value outside
 its range is raised or lowered and noted in the activity log, the same policy
 `[intervals]` uses.
+
+#### Mouse
+
+By default nadir captures the mouse: clicking a panel focuses it, and clicking a
+row in Tracked, Passes or Launches selects it, exactly as `j`/`k` would;
+double-clicking a Tracked entry starts tracking it, like `Enter`. The cost
+is that the terminal's own click-drag text selection is off while nadir is
+running — hold `Shift` while dragging to select text anyway, which every modern
+terminal honours. If you'd rather never think about it, set `mouse = false` under
+`[ui]` and nadir won't capture the mouse at all; everything stays reachable from
+the keyboard.
 
 ### Tracking other objects
 
@@ -217,6 +229,7 @@ and will not work here.
 | `n` / `N` | jump to `aos_lead` before the next pass / next naked-eye pass, paused there |
 | `g` | go to a time — `2026-09-08 04:30`, `04:30`, or an offset like `+90m` |
 | `0` | snap the clock back to now, running at 1× |
+| click | focus the panel under the pointer; on Tracked, Passes or Launches, select the row; double-click a Tracked entry to track it (needs mouse capture — see [below](#mouse)) |
 | `?` | help — a scrollable in-app reference to every field, symbol and status chip |
 | `q` / `Esc` / `Ctrl+C` | quit — `Ctrl+C` works from anywhere, including inside a prompt |
 

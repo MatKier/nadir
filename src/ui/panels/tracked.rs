@@ -6,14 +6,17 @@
 use ratatui::layout::Rect;
 use ratatui::style::Style;
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{List, ListItem, ListState, Paragraph};
+use ratatui::widgets::{ListItem, Paragraph};
 use ratatui::Frame;
 
 use crate::app::{App, Panel};
 use crate::ui::panels::fmt::{dim, row_highlight, truncate};
+use crate::ui::hit::{render_list, RowSpan};
 use crate::ui::{is_focused, panel_block, Theme};
 
-pub fn draw(frame: &mut Frame, area: Rect, app: &App) {
+/// Draws the panel and returns the screen rows its visible entries landed on,
+/// as `(y0, y1, index)`, for `ui::hit` — empty when there is nothing to click.
+pub fn draw(frame: &mut Frame, area: Rect, app: &App) -> Vec<RowSpan> {
     let focused = is_focused(app, Panel::Tracked);
     let block = panel_block(Panel::Tracked, "TRACKED", focused);
 
@@ -22,7 +25,7 @@ pub fn draw(frame: &mut Frame, area: Rect, app: &App) {
             Paragraph::new(dim("  press s to search for a satellite")).block(block),
             area,
         );
-        return;
+        return Vec::new();
     }
 
     // Budget the name against the panel's actual width: two border columns,
@@ -48,6 +51,9 @@ pub fn draw(frame: &mut Frame, area: Rect, app: &App) {
         .collect();
 
     let selected = focused.then(|| app.list_pos.min(app.config.tracked.len().saturating_sub(1)));
-    let list = List::new(items).block(block).highlight_style(row_highlight()).highlight_symbol("▶ ");
-    frame.render_stateful_widget(list, area, &mut ListState::default().with_selected(selected));
+    // The block goes to the `List`, so its inner rect is taken before it moves.
+    let inner = block.inner(area);
+    render_list(frame, area, inner, items, selected, |list| {
+        list.block(block).highlight_style(row_highlight()).highlight_symbol("▶ ")
+    })
 }

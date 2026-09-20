@@ -7,7 +7,10 @@ use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
-use ratatui::crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
+use ratatui::crossterm::event::{
+    self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEvent, KeyEventKind,
+    KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
+};
 use tokio::sync::{mpsc, watch, Notify};
 
 use crate::api;
@@ -248,6 +251,20 @@ pub struct App {
     /// permanently complete, so there's nothing to gain from clearing it and
     /// somewhere for the last switch's identity to be lost if it were.
     pub acquired: Option<(u64, Instant)>,
+    /// When the badge easter egg (`ui::egg`) last took off — set by a click on
+    /// the title bar's ` nadir ` chip, and, like `acquired`, never reset:
+    /// `ui::egg::draw` and `egg_active` both gate on `EGG_FLIGHT` having
+    /// elapsed rather than on this being `Some`, so a finished flight costs
+    /// nothing and a second click simply restarts it.
+    pub egg: Option<Instant>,
+    /// Where the last drawn frame put each panel and list row, for
+    /// `handle_mouse` to map a click back to. Written by `ui::draw` (which
+    /// empties it first, so a frame with no dashboard leaves nothing to click).
+    pub hit: ui::HitMap,
+    /// The last list-row click — when, and which panel and row — so a second
+    /// click on the same row within `DOUBLE_CLICK` reads as a double-click.
+    /// Terminals report only individual presses, so this is tracked by hand.
+    last_click: Option<(Instant, Panel, usize)>,
     /// The disk cache `run` opened for the whole session — kept here so
     /// `switch_satellite` can warm-start the new satellite's element set from
     /// it directly, the same `Feed::recover` call `load_all_from_cache` makes
@@ -309,6 +326,25 @@ impl App {
     /// drift apart.
     pub fn splash_active(&self) -> bool {
         !self.splash_skipped && self.uptime() < self.config.ui.splash
+    }
+
+    /// Whether the badge egg is still in flight. Gated on the flight's length,
+    /// like `is_animating`'s `acquiring` clause, since `egg` itself is never
+    /// cleared.
+    pub fn egg_active(&self) -> bool {
+        self.egg.is_some_and(|at| at.elapsed() < ui::EGG_FLIGHT)
+    }
+
+    /// Whether a short-lived, bounded flourish that wants the fast frame rate
+    /// is on screen: the boot splash or the badge egg. Both are the same kind
+    /// of thing — a few seconds at most, cheap to draw, and a fast slide that
+    /// would step visibly at `FRAME_ANIM`'s 10 fps — so `frame_interval` takes
+    /// them as one flag. Deliberately *not* a clause of `is_animating` for the
+    /// reason its own note gives the splash: `frame_interval`'s `showpiece`
+    /// arm always wins over the `animating` one, so a clause there would be
+    /// evaluated and then never change the result.
+    pub fn showpiece_active(&self) -> bool {
+        self.splash_active() || self.egg_active()
     }
 
     /// Whether something on screen is moving on its own right now — the
@@ -523,6 +559,69 @@ impl App {
         if let Ok(mut d) = self.data.write() {
             let star = if visible { " — naked-eye visible" } else { "" };
             d.note(format!("AOS: satellite overhead, peak {peak_elevation_deg:.0}°{star}"));
+        }
+    }
+
+    /// A left click, mapped through what the last frame drew (`self.hit`).
+    /// Every other mouse event was dropped in `forwards` before reaching here,
+    /// but is re-checked so this stays correct if it is ever called directly.
+    ///
+    /// In order: the boot splash swallows it exactly as it does a keypress; an
+    /// open popup or the help overlay swallows it (they swallow keys the same
+    /// way, and the dashboard behind them is not what a click meant); the
+    /// title bar's badge launches the easter egg; a list row focuses its panel
+    /// and selects that row; anything else inside a panel just focuses it.
+    fn handle_mouse(&mut self, m: MouseEvent) {
+        if !matches!(m.kind, MouseEventKind::Down(MouseButton::Left)) {
+            return;
+        }
+        if self.splash_active() {
+            self.splash_skipped = true;
+            return;
+        }
+        if self.sat_input.is_some()
+            || self.tx_input.is_some()
+            || self.time_input.is_some()
+            || self.show_help
+        {
+            return;
+        }
+
+        let (col, row) = (m.column, m.row);
+        // The badge is only there on a frame that drew the dashboard: the
+        // splash and the too-small message record no panels.
+        if self.hit.is_drawn() && ui::badge_hit(col, row) {
+            self.egg = Some(Instant::now());
+            return;
+        }
+        if let Some((panel, index)) = self.hit.row_at(col, row) {
+            // `focus_clicked` first: it may zero `list_pos`, so the row is
+            // applied after it.
+            self.focus_clicked(panel);
+            self.list_pos = index;
+            // A double-click on a TRACKED entry is `Enter` on it. The pair is
+            // consumed, so a third click starts a fresh one rather than
+            // counting as another double.
+            let double = self
+                .last_click
+                .take()
+                .is_some_and(|(at, p, i)| p == panel && i == index && at.elapsed() < DOUBLE_CLICK);
+            self.last_click = (!double).then(|| (Instant::now(), panel, index));
+            if double && panel == Panel::Tracked {
+                self.track_selected();
+            }
+        } else if let Some(panel) = self.hit.panel_at(col, row) {
+            self.focus_clicked(panel);
+        }
+    }
+
+    /// Focus `panel` for a click, but only if it isn't already focused:
+    /// `set_focus` resets `list_pos` (which the `1`–`6` keys rely on), and a
+    /// click on a focused panel's border or blank space shouldn't throw away
+    /// the row already highlighted in it.
+    fn focus_clicked(&mut self, panel: Panel) {
+        if self.focus != panel {
+            self.set_focus(panel);
         }
     }
 
@@ -1279,6 +1378,9 @@ pub async fn run(mut config: Config, skip_splash: bool) -> Result<()> {
         passes_from: None,
         last_aos_seen: None,
         acquired: None,
+        egg: None,
+        last_click: None,
+        hit: ui::HitMap::default(),
         cache: cache.clone(),
         sat_tx,
         search_tx,
@@ -1288,8 +1390,24 @@ pub async fn run(mut config: Config, skip_splash: bool) -> Result<()> {
         list_pos: 0,
     };
 
+    let mouse = app.config.ui.mouse;
     let mut terminal = ratatui::init();
+    if mouse {
+        let _ = ratatui::crossterm::execute!(std::io::stdout(), EnableMouseCapture);
+        // `ratatui::init` installed a panic hook that restores the terminal —
+        // but `restore` does not know about mouse capture, so a panic would
+        // leave the shell reporting every mouse move as escape codes. Ours
+        // goes on top (so it must come *after* `init`) and chains to that one.
+        let previous = std::panic::take_hook();
+        std::panic::set_hook(Box::new(move |info| {
+            let _ = ratatui::crossterm::execute!(std::io::stdout(), DisableMouseCapture);
+            previous(info);
+        }));
+    }
     let result = render_loop(&mut terminal, &mut app, input_rx).await;
+    if mouse {
+        let _ = ratatui::crossterm::execute!(std::io::stdout(), DisableMouseCapture);
+    }
     ratatui::restore();
     result
 }
@@ -1335,20 +1453,24 @@ pub fn shutdown_runtime(runtime: tokio::runtime::Runtime) {
 /// it draws no `night_wash`-style per-cell resample, so the frame it costs is
 /// cheap and bounded — worth spending to keep a satellite crossing the whole
 /// frame from stepping across it in visible jumps.
+/// How close together two clicks on one row must be to count as a double-click.
+const DOUBLE_CLICK: Duration = Duration::from_millis(400);
+
 const FRAME_LIVE: Duration = Duration::from_millis(250);
 const FRAME_ANIM: Duration = Duration::from_millis(100);
 const FRAME_WARP: Duration = Duration::from_millis(40);
 
 /// How long to wait for the next frame. Split out of `render_loop` so the
 /// cadence can be asserted without a terminal. `animating` is
-/// `App::is_animating` and `splash` is `App::splash_active` — both threaded
-/// in as plain values for the same reason.
-fn frame_interval(state: ClockState, animating: bool, splash: bool) -> Duration {
+/// `App::is_animating` and `showpiece` is `App::showpiece_active` (the boot
+/// splash or the badge egg) — both threaded in as plain values for the same
+/// reason.
+fn frame_interval(state: ClockState, animating: bool, showpiece: bool) -> Duration {
     match state {
         // A warp always wins: it's already redrawing faster than FRAME_ANIM
         // or the splash asks for, so there's nothing left to speed up.
         ClockState::Warp(_) => FRAME_WARP,
-        _ if splash => FRAME_WARP,
+        _ if showpiece => FRAME_WARP,
         _ if animating => FRAME_ANIM,
         // `Drifted` moves at real speed and `Paused` does not move at all,
         // so both are as static as `Live` once nothing is animating either.
@@ -1381,9 +1503,10 @@ async fn render_loop(
         // `Interval::set_period`, and a per-iteration sleep cannot build up the
         // catch-up burst `MissedTickBehavior::Skip` used to guard against.
         tokio::select! {
-            _ = tokio::time::sleep(frame_interval(app.clock.state(), app.is_animating(), app.splash_active())) => {}
+            _ = tokio::time::sleep(frame_interval(app.clock.state(), app.is_animating(), app.showpiece_active())) => {}
             maybe_event = input_rx.recv() => {
                 match maybe_event {
+                    Some(Event::Mouse(m)) => app.handle_mouse(m),
                     Some(Event::Key(key)) => {
                         app.handle_key(key);
                         // Auto-repeat can queue keys faster than a frame takes
@@ -1393,6 +1516,9 @@ async fn render_loop(
                         while !app.should_quit {
                             match input_rx.try_recv() {
                                 Ok(Event::Key(k)) => app.handle_key(k),
+                                // Not swallowed with the rest: a click queued
+                                // behind a held key would otherwise vanish.
+                                Ok(Event::Mouse(m)) => app.handle_mouse(m),
                                 Ok(_) => {}
                                 Err(_) => break,
                             }
@@ -1406,12 +1532,24 @@ async fn render_loop(
     }
 }
 
+/// Whether an input event is worth waking the render loop for. Everything is,
+/// except the mouse traffic other than a left click: with capture on, the
+/// terminal reports every motion and drag, and each of those forwarded would
+/// wake the `select!` and redraw at event cadence, defeating `frame_interval`'s
+/// 4 fps idle floor. Dropped here, in the producer, so they never reach it.
+fn forwards(ev: &Event) -> bool {
+    match ev {
+        Event::Mouse(m) => matches!(m.kind, MouseEventKind::Down(MouseButton::Left)),
+        _ => true,
+    }
+}
+
 /// Blocking `crossterm` reads live on their own OS thread and are forwarded here.
 fn spawn_input_thread(tx: mpsc::UnboundedSender<Event>) {
     std::thread::spawn(move || loop {
         match event::read() {
             Ok(ev) => {
-                if tx.send(ev).is_err() {
+                if forwards(&ev) && tx.send(ev).is_err() {
                     break;
                 }
             }
@@ -1972,6 +2110,9 @@ mod tests {
             passes_from: None,
             last_aos_seen: None,
             acquired: None,
+            egg: None,
+            last_click: None,
+            hit: ui::HitMap::default(),
             sat_tx,
             search_tx,
             tx_lookup_tx,
@@ -2292,6 +2433,316 @@ mod tests {
 
     fn press_code(app: &mut App, code: KeyCode) {
         app.handle_key(KeyEvent::new(code, KeyModifiers::NONE));
+    }
+
+    fn click(app: &mut App, col: u16, row: u16) {
+        app.handle_mouse(MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: col,
+            row,
+            modifiers: KeyModifiers::NONE,
+        });
+    }
+
+    /// Draw one real frame into an in-memory terminal, so `app.hit` is what
+    /// `ui::draw` actually produces rather than a hand-built map that could
+    /// agree with these tests and disagree with the screen.
+    fn draw_frame(app: &mut App, width: u16, height: u16) -> ratatui::buffer::Buffer {
+        let backend = ratatui::backend::TestBackend::new(width, height);
+        let mut terminal = ratatui::Terminal::new(backend).unwrap();
+        terminal.draw(|f| ui::draw(f, app)).unwrap();
+        terminal.backend().buffer().clone()
+    }
+
+    /// The title bar (row 0) of a drawn frame, as text.
+    fn title_row(buf: &ratatui::buffer::Buffer) -> String {
+        (0..buf.area.width).map(|x| buf[(x, 0)].symbol().to_string()).collect()
+    }
+
+    fn panel_rect(app: &App, panel: Panel) -> ratatui::layout::Rect {
+        app.hit.panels.iter().find(|(_, p)| *p == panel).expect("panel was drawn").0
+    }
+
+    /// An app with three tracked satellites, focused elsewhere, and one frame drawn.
+    fn drawn_app_with_tracked() -> App {
+        let mut config = Config::default();
+        config.track(25544, "ISS (ZARYA)");
+        config.track(20580, "HST");
+        config.track(43013, "NOAA 20");
+        let mut app = test_app(config);
+        draw_frame(&mut app, 140, 40);
+        app
+    }
+
+    #[test]
+    fn clicking_a_panel_focuses_it() {
+        let mut app = drawn_app_with_tracked();
+        let r = panel_rect(&app, Panel::Weather);
+        assert_ne!(app.focus, Panel::Weather);
+        click(&mut app, r.x + 2, r.y + 1);
+        assert_eq!(app.focus, Panel::Weather);
+    }
+
+    #[test]
+    fn clicking_the_panel_that_already_has_focus_keeps_its_highlighted_row() {
+        let mut app = drawn_app_with_tracked();
+        app.set_focus(Panel::Tracked);
+        app.list_pos = 2;
+        draw_frame(&mut app, 140, 40);
+        // The panel's own top-left corner: inside its rect, on no row.
+        let r = panel_rect(&app, Panel::Tracked);
+        click(&mut app, r.x, r.y);
+        assert_eq!(app.focus, Panel::Tracked);
+        assert_eq!(app.list_pos, 2, "a re-focus must not reset the selection to the top");
+    }
+
+    #[test]
+    fn clicking_a_list_row_focuses_the_panel_and_selects_that_row() {
+        let mut app = drawn_app_with_tracked();
+        // Tracked is the default focus, so park it elsewhere: the click has to
+        // do the focusing itself for the `set_focus`-then-row ordering to matter.
+        app.set_focus(Panel::Weather);
+        draw_frame(&mut app, 140, 40);
+        let rows: Vec<_> = app.hit.rows.iter().filter(|r| r.0 == Panel::Tracked).collect();
+        assert_eq!(rows.len(), 3, "all three tracked satellites are on screen");
+        let (_, y0, _, index) = *rows[2];
+        assert_eq!(index, 2);
+        let r = panel_rect(&app, Panel::Tracked);
+        click(&mut app, r.x + 3, y0);
+        assert_eq!(app.focus, Panel::Tracked);
+        assert_eq!(app.list_pos, 2, "set_focus zeroes list_pos, so the row must land after it");
+    }
+
+    fn tracked_row_y(app: &App, index: usize) -> (u16, u16) {
+        let y = app.hit.rows.iter().find(|r| r.0 == Panel::Tracked && r.3 == index).unwrap().1;
+        (panel_rect(app, Panel::Tracked).x + 3, y)
+    }
+
+    #[test]
+    fn double_clicking_a_tracked_entry_starts_tracking_it() {
+        let mut app = drawn_app_with_tracked();
+        let (x, y) = tracked_row_y(&app, 1);
+        let target = app.config.tracked[1].norad_id;
+        assert_ne!(app.config.sat, target);
+        click(&mut app, x, y);
+        assert_ne!(app.config.sat, target, "one click only selects");
+        click(&mut app, x, y);
+        assert_eq!(app.config.sat, target);
+    }
+
+    #[test]
+    fn two_clicks_on_different_tracked_rows_are_not_a_double_click() {
+        let mut app = drawn_app_with_tracked();
+        let sat = app.config.sat;
+        let (x, y0) = tracked_row_y(&app, 0);
+        let (_, y1) = tracked_row_y(&app, 1);
+        click(&mut app, x, y0);
+        click(&mut app, x, y1);
+        assert_eq!(app.config.sat, sat);
+        assert_eq!(app.list_pos, 1);
+    }
+
+    #[test]
+    fn a_second_click_after_the_double_click_window_is_just_a_click() {
+        let mut app = drawn_app_with_tracked();
+        let sat = app.config.sat;
+        let (x, y) = tracked_row_y(&app, 1);
+        click(&mut app, x, y);
+        app.last_click = app.last_click.map(|(_, p, i)| {
+            (Instant::now() - DOUBLE_CLICK - Duration::from_millis(1), p, i)
+        });
+        click(&mut app, x, y);
+        assert_eq!(app.config.sat, sat, "too slow to be a double-click");
+    }
+
+    #[test]
+    fn a_third_click_starts_a_fresh_pair_rather_than_double_clicking_again() {
+        let mut app = drawn_app_with_tracked();
+        let (x, y) = tracked_row_y(&app, 1);
+        click(&mut app, x, y);
+        click(&mut app, x, y);
+        assert!(app.last_click.is_none(), "the pair is consumed");
+    }
+
+    #[test]
+    fn double_clicking_a_row_outside_tracked_only_selects_it() {
+        // Passes/Launches rows have no "track" action; a double-click there
+        // must not do anything Tracked's does.
+        let mut app = drawn_app_with_tracked();
+        let sat = app.config.sat;
+        let r = panel_rect(&app, Panel::Weather);
+        click(&mut app, r.x + 2, r.y + 1);
+        click(&mut app, r.x + 2, r.y + 1);
+        assert_eq!(app.config.sat, sat);
+    }
+
+    #[test]
+    fn clicking_a_row_in_the_focused_list_moves_the_selection_to_it() {
+        let mut app = drawn_app_with_tracked();
+        app.set_focus(Panel::Tracked);
+        draw_frame(&mut app, 140, 40);
+        let y1 = app.hit.rows.iter().find(|r| r.0 == Panel::Tracked && r.3 == 1).unwrap().1;
+        let r = panel_rect(&app, Panel::Tracked);
+        click(&mut app, r.x + 3, y1);
+        assert_eq!(app.list_pos, 1);
+    }
+
+    #[test]
+    fn a_click_beside_a_list_on_the_same_screen_row_does_not_select_it() {
+        // Same screen row as a TRACKED entry, but out in the map's columns.
+        let mut app = drawn_app_with_tracked();
+        let y0 = app.hit.rows.iter().find(|r| r.0 == Panel::Tracked).unwrap().1;
+        click(&mut app, 2, y0);
+        assert_eq!(app.focus, Panel::Map, "focus went to the map under the click, not TRACKED");
+        assert_eq!(app.list_pos, 0);
+    }
+
+    #[test]
+    fn clicking_the_badge_launches_the_egg_and_focuses_nothing() {
+        let mut app = drawn_app_with_tracked();
+        let focus = app.focus;
+        assert!(!app.egg_active());
+        click(&mut app, 3, 0);
+        assert!(app.egg_active(), "the flight has just begun");
+        assert_eq!(app.focus, focus);
+    }
+
+    #[test]
+    fn a_click_just_past_the_badge_does_not_launch_the_egg() {
+        let mut app = drawn_app_with_tracked();
+        // One cell past the 7-cell ` nadir ` chip: the gap, not the badge.
+        click(&mut app, 7, 0);
+        assert!(app.egg.is_none());
+    }
+
+    #[test]
+    fn the_badge_works_in_the_fullscreen_map_layout_too() {
+        // The two layouts each draw their own title bar; the egg must not have
+        // been wired into only one of them.
+        let mut app = drawn_app_with_tracked();
+        press(&mut app, 'm');
+        assert!(app.map_fullscreen);
+        draw_frame(&mut app, 140, 40);
+        click(&mut app, 0, 0);
+        assert!(app.egg_active());
+    }
+
+    // The egg is painted from inside `title_bar`, which runs first in each
+    // layout — everything after it draws into the same buffer. These go through
+    // the real `ui::draw` so they would notice anything later reaching row 0
+    // and hiding it, which the `egg::paint` unit tests alone cannot.
+    #[test]
+    fn a_frame_drawn_mid_flight_carries_the_satellite_on_the_title_row() {
+        let mut app = drawn_app_with_tracked();
+        app.egg = Some(Instant::now() - ui::EGG_FLIGHT / 2);
+        let row0 = title_row(&draw_frame(&mut app, 140, 40));
+        assert!(row0.contains('◆'), "the egg never reached the screen: {row0}");
+    }
+
+    #[test]
+    fn a_fullscreen_frame_drawn_mid_flight_carries_the_satellite_too() {
+        let mut app = drawn_app_with_tracked();
+        press(&mut app, 'm');
+        app.egg = Some(Instant::now() - ui::EGG_FLIGHT / 2);
+        let row0 = title_row(&draw_frame(&mut app, 140, 40));
+        assert!(row0.contains('◆'), "the egg never reached the fullscreen screen: {row0}");
+    }
+
+    #[test]
+    fn a_frame_drawn_after_the_flight_has_no_satellite_left_on_the_title_row() {
+        let mut app = drawn_app_with_tracked();
+        app.egg = Some(Instant::now() - ui::EGG_FLIGHT - Duration::from_millis(1));
+        let row0 = title_row(&draw_frame(&mut app, 140, 40));
+        assert!(!row0.contains('◆'), "a finished egg must not park on the bar: {row0}");
+    }
+
+    #[test]
+    fn a_frame_that_draws_no_dashboard_leaves_nothing_to_click() {
+        let mut app = drawn_app_with_tracked();
+        assert!(!app.hit.panels.is_empty());
+        // Below the 80x24 minimum `ui::draw` shows only a "too small" message.
+        draw_frame(&mut app, 40, 10);
+        assert_eq!(app.hit, ui::HitMap::default());
+        click(&mut app, 3, 0);
+        assert!(app.egg.is_none(), "no badge was drawn, so there is nothing to launch");
+    }
+
+    #[test]
+    fn clicking_during_the_splash_skips_it_like_any_key() {
+        let mut config = Config::default();
+        config.ui.splash = Duration::from_secs(10);
+        let mut app = test_app(config);
+        app.splash_skipped = false;
+        assert!(app.splash_active());
+        click(&mut app, 5, 5);
+        assert!(app.splash_skipped);
+        assert!(app.egg.is_none());
+    }
+
+    #[test]
+    fn a_click_is_ignored_while_a_popup_or_the_help_overlay_is_open() {
+        let mut app = drawn_app_with_tracked();
+        press(&mut app, 's');
+        assert!(app.sat_input.is_some());
+        click(&mut app, 3, 0);
+        assert!(app.egg.is_none(), "the search popup swallows the click");
+        app.sat_input = None;
+
+        press(&mut app, '?');
+        assert!(app.show_help);
+        click(&mut app, 3, 0);
+        assert!(app.egg.is_none(), "and so does the help overlay");
+    }
+
+    #[test]
+    fn only_a_left_click_is_acted_on() {
+        let mut app = drawn_app_with_tracked();
+        for kind in [
+            MouseEventKind::Down(MouseButton::Right),
+            MouseEventKind::Up(MouseButton::Left),
+            MouseEventKind::Moved,
+            MouseEventKind::ScrollDown,
+        ] {
+            app.handle_mouse(MouseEvent { kind, column: 3, row: 0, modifiers: KeyModifiers::NONE });
+        }
+        assert!(app.egg.is_none());
+    }
+
+    #[test]
+    fn the_input_thread_forwards_keys_and_left_clicks_but_drops_the_rest_of_the_mouse() {
+        let mouse = |kind| {
+            Event::Mouse(MouseEvent { kind, column: 0, row: 0, modifiers: KeyModifiers::NONE })
+        };
+        assert!(forwards(&Event::Key(KeyEvent::new(KeyCode::Char('q'), KeyModifiers::NONE))));
+        assert!(forwards(&mouse(MouseEventKind::Down(MouseButton::Left))));
+        // Motion is the one that matters: with capture on the terminal sends
+        // it constantly, and each forwarded event would wake the render loop.
+        assert!(!forwards(&mouse(MouseEventKind::Moved)));
+        assert!(!forwards(&mouse(MouseEventKind::Drag(MouseButton::Left))));
+        assert!(!forwards(&mouse(MouseEventKind::Up(MouseButton::Left))));
+        assert!(!forwards(&mouse(MouseEventKind::ScrollUp)));
+    }
+
+    #[test]
+    fn the_egg_is_active_only_for_the_length_of_its_flight() {
+        let mut app = test_app(Config::default());
+        assert!(!app.egg_active(), "no click, no egg");
+        app.egg = Some(Instant::now());
+        assert!(app.egg_active());
+        app.egg = Some(Instant::now() - ui::EGG_FLIGHT - Duration::from_millis(1));
+        assert!(!app.egg_active(), "a finished flight is over even though `egg` is still Some");
+    }
+
+    #[test]
+    fn a_flying_egg_asks_for_the_fast_frame_rate_and_a_finished_one_does_not() {
+        let mut app = test_app(Config::default());
+        assert!(!app.showpiece_active());
+        assert_eq!(frame_interval(ClockState::Live, false, app.showpiece_active()), FRAME_LIVE);
+        app.egg = Some(Instant::now());
+        assert!(app.showpiece_active());
+        assert_eq!(frame_interval(ClockState::Live, false, app.showpiece_active()), FRAME_WARP);
+        app.egg = Some(Instant::now() - ui::EGG_FLIGHT - Duration::from_millis(1));
+        assert_eq!(frame_interval(ClockState::Live, false, app.showpiece_active()), FRAME_LIVE);
     }
 
     #[test]

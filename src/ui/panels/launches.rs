@@ -4,18 +4,28 @@ use chrono::{DateTime, Duration, Utc};
 use ratatui::layout::Rect;
 use ratatui::style::{Color, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{List, ListItem, ListState, Paragraph};
+use ratatui::widgets::{ListItem, Paragraph};
 use ratatui::Frame;
 
 use crate::api::launches::Origin;
 use crate::app::{App, AppData, Panel};
 use crate::source::Health;
+use crate::ui::hit::{render_list, RowSpan};
 use crate::ui::panels::fmt::{dim, footer, row_highlight, truncate};
 use crate::ui::{is_focused, panel_block, Theme};
 
 /// `wall_now`, not the simulated clock: a launch countdown tracks a real
 /// scheduled event, so scrubbing the display time must not move it.
-pub fn draw(frame: &mut Frame, area: Rect, app: &App, data: &AppData, wall_now: DateTime<Utc>) {
+/// Draws the panel and returns the screen rows its visible entries landed on,
+/// as `(y0, y1, index)`, for `ui::hit`. The highlighted entry is two lines
+/// tall, so the spans are not a uniform grid.
+pub fn draw(
+    frame: &mut Frame,
+    area: Rect,
+    app: &App,
+    data: &AppData,
+    wall_now: DateTime<Utc>,
+) -> Vec<RowSpan> {
     let mut block = panel_block(Panel::Launches, "LAUNCHES", is_focused(app, Panel::Launches));
     // Note where the launch list actually came from, when it isn't a live
     // pull from the primary host — the mirror or the disk cache.
@@ -39,6 +49,7 @@ pub fn draw(frame: &mut Frame, area: Rect, app: &App, data: &AppData, wall_now: 
     // A scrollable list when the Launches panel has focus, so a fetched
     // batch bigger than the panel's height is still all reachable.
     let launch_focused = is_focused(app, Panel::Launches);
+    let mut rows = Vec::new();
     match data.launches.get().map(|l| &l.list) {
         Some(list) if !list.is_empty() => {
             // Every row's countdown text, and its color — built first so the
@@ -112,12 +123,9 @@ pub fn draw(frame: &mut Frame, area: Rect, app: &App, data: &AppData, wall_now: 
                     }
                 })
                 .collect();
-            let widget = List::new(items).highlight_style(row_highlight());
-            frame.render_stateful_widget(
-                widget,
-                launch_area,
-                &mut ListState::default().with_selected(selected),
-            );
+            rows = render_list(frame, launch_area, launch_area, items, selected, |list| {
+                list.highlight_style(row_highlight())
+            });
         }
         Some(_) => {
             frame.render_widget(Paragraph::new(dim("  no upcoming launches listed")), launch_area);
@@ -133,6 +141,7 @@ pub fn draw(frame: &mut Frame, area: Rect, app: &App, data: &AppData, wall_now: 
             frame.render_widget(Paragraph::new(line), launch_area);
         }
     }
+    rows
 }
 
 /// A launch name carries how much the feed actually commits to the row:

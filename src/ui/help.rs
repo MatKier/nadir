@@ -86,6 +86,9 @@ fn content(app: &App) -> Vec<Line<'static>> {
     row(&mut l, "r", "refresh the focused panel's feed(s) now");
     row(&mut l, "t", "step to the next configured downlink (drives the DOPP row)");
     row(&mut l, "T", "pick a downlink / look one up on SatNOGS DB for this satellite");
+    row(&mut l, "click", "focus the panel under the pointer; on a list, select the row");
+    text(&mut l, "     double-click a Tracked entry to start tracking it");
+    text(&mut l, "     Shift+drag still selects text; `[ui] mouse = false` turns capture off");
     row(&mut l, "?", "toggle this help");
     row(&mut l, "q / Esc", "quit (Esc closes this help first)");
     row(&mut l, "Ctrl+C", "quit from anywhere, including a prompt or this help");

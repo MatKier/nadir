@@ -5,13 +5,14 @@ use chrono::{DateTime, Duration, FixedOffset, Local, Utc};
 use ratatui::layout::Rect;
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, List, ListItem, ListState, Paragraph, Wrap};
+use ratatui::widgets::{Block, ListItem, Paragraph, Wrap};
 use ratatui::Frame;
 
 use crate::app::{App, Panel};
 use crate::orbit::{Confidence, Pass, SatState, Tracker};
 use crate::simclock::ClockState;
 use crate::ui::anim::{lerp, pulse};
+use crate::ui::hit::{render_list, RowSpan};
 use crate::ui::panels::fmt::{compass, dim, row_highlight, split_footer, station_label, DATE_FMT};
 use crate::ui::{is_focused, panel_block, panel_block_styled, Theme, PANEL_CHROME};
 
@@ -26,7 +27,7 @@ pub fn draw(
     app: &App,
     sat: Option<&(Tracker, SatState)>,
     now: DateTime<Utc>,
-) {
+) -> Vec<RowSpan> {
     let focused = is_focused(app, Panel::Passes);
 
     if app.config.ground_station().is_none() {
@@ -39,7 +40,7 @@ pub fn draw(
         .block(block)
         .wrap(Wrap { trim: true });
         frame.render_widget(p, area);
-        return;
+        return Vec::new();
     }
 
     // `app.passes` keeps a look-back of already-set passes so a pass under way
@@ -80,7 +81,7 @@ pub fn draw(
                 .wrap(Wrap { trim: true }),
             area,
         );
-        return;
+        return Vec::new();
     }
 
     // Reserve the bottom inner row for an accuracy footer, but only when the
@@ -102,18 +103,14 @@ pub fn draw(
         pass_rows(passes, now, lead, budget).into_iter().map(ListItem::new).collect();
 
     let selected = focused.then(|| app.list_pos.min(passes.len().saturating_sub(1)));
-    let list = List::new(items)
-        .highlight_style(row_highlight())
-        .highlight_symbol("▶ ");
-    frame.render_stateful_widget(
-        list,
-        list_area,
-        &mut ListState::default().with_selected(selected),
-    );
+    let rows = render_list(frame, list_area, list_area, items, selected, |list| {
+        list.highlight_style(row_highlight()).highlight_symbol("▶ ")
+    });
 
     if let (Some((text, color)), Some(fa)) = (footer, footer_area) {
         frame.render_widget(Paragraph::new(Span::styled(text, Style::new().fg(color))), fa);
     }
+    rows
 }
 
 /// The panel block while a pass is under way: its border tinted toward

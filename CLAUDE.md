@@ -93,8 +93,38 @@ shimmer, a sky-plot twinkle, the AOS border pulse, an acquisition sweep still
 in flight), 40 ms during a clock warp *or* the whole time the boot splash is
 up (`ui/splash.rs`'s starfield and transiting satellite run for the full
 `config.ui.splash`, not just the first third the console rows themselves
-reveal over). It takes the `RwLock` read guard once per frame and drops it
-before drawing the help overlay.
+reveal over) *or* the badge easter egg is in flight — both arrive through
+`App::showpiece_active`, the one flag `frame_interval` takes for "a short,
+bounded flourish on screen", rather than as `is_animating` clauses (its
+`showpiece` arm always wins over the `animating` one, so a clause would be
+evaluated for nothing). It takes the `RwLock` read guard once per frame and
+drops it before drawing the help overlay.
+
+### Mouse
+
+Capture is on by default (`[ui] mouse = false` opts out) and is enabled and
+disabled around `render_loop` in `app::run`, with a panic hook of our own
+installed *after* `ratatui::init()` — `ratatui::restore()` doesn't know about
+capture, so ratatui's hook alone would leave a panicking session's shell
+reporting every mouse move. The input thread drops every mouse event but a left
+click (`forwards`), because motion would otherwise wake the render loop at event
+cadence and defeat the 4 fps idle floor.
+
+Clicks are resolved against `App::hit`, a `ui::HitMap` that `ui::draw` empties
+at its very top and refills as the panels draw (each list panel's `draw` returns
+its visible row spans), so a frame with no dashboard — the splash, the too-small
+message — leaves nothing to click. Don't recompute panel rects in
+`handle_mouse`; that would be a second copy of the layout ladder. A list's row
+spans must be built from its `ListState` offset *after* rendering, since
+ratatui rewrites the offset during render — `ui::hit::render_list` does that
+once for all three list panels, so use it rather than a fourth copy.
+
+The title bar's ` nadir ` chip launches a small easter egg (`ui/egg.rs`). It is
+deliberately absent from README and the `?` overlay — that is the point of it —
+so their "must agree" rule covers the mouse *capture* they do document, not the
+egg. It is confined to the title row so it never draws over a live reading.
+`ui::hit::BADGE` is the one string the chip's render, its hit rect and the title
+bar's width budget all read; don't respell it.
 
 ### Network etiquette is load-bearing
 
@@ -108,12 +138,14 @@ per feed (1h / 1m / 5m / 10m) so no config file can turn nadir into a bad
 upstream client. Don't shorten the defaults, or weaken a floor, to make a change
 easier to observe.
 
-Presentation timings — the AOS lead-in window and the boot splash duration —
-live in a separate, non-network `config::Ui` table with its own `clamped()`:
-unlike `Intervals`, these have a real ceiling as well as a floor, so it clamps
-a range rather than only raising a too-eager value. Same `[section]`-with-
-defaults shape as `Intervals`, wired into `App::run`'s startup sequence the
-same way.
+Presentation settings — the AOS lead-in window, the boot splash duration and
+the `mouse` flag — live in a separate, non-network `config::Ui` table with its
+own `clamped()`, which rebuilds `Self` field by field, so a new field must be
+carried through it by hand (a bool like `mouse` just copies, with no range).
+What it does clamp are the two durations: unlike `Intervals`, they have a real
+ceiling as well as a floor, so it clamps a range rather than only raising a
+too-eager value. Same `[section]`-with-defaults shape as `Intervals`, wired
+into `App::run`'s startup sequence the same way.
 
 ## Conventions
 

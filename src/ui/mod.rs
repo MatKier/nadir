@@ -3,8 +3,10 @@
 mod anim;
 mod canvas;
 mod coastline;
+mod egg;
 mod globe;
 mod help;
+mod hit;
 mod map;
 mod panels;
 mod places;
@@ -16,6 +18,16 @@ mod track;
 /// The tightest follow-mode zoom index, re-exported so `App::zoom_in` can
 /// saturate against it without `mod map` being made public.
 pub(crate) use map::MAX_ZOOM;
+
+/// Re-exported for the same reason: `App` stores the last frame's hit map and
+/// `App::handle_mouse` reads it, neither of which should need `mod hit` public.
+pub use hit::HitMap;
+pub(crate) use hit::badge_hit;
+
+/// How long the badge easter egg (`ui::egg`) flies for. `pub(crate)` because
+/// `App::egg_active` needs it to pick the faster frame rate, exactly as
+/// `ACQUIRE_REVEAL` is shared with `App::is_animating`.
+pub(crate) use egg::EGG_FLIGHT;
 
 use std::time::Duration;
 
@@ -102,6 +114,13 @@ impl Theme {
 pub fn draw(frame: &mut Frame, app: &mut App) {
     let area = frame.area();
 
+    // Emptied before anything can return early, so a frame that draws no
+    // dashboard — the too-small message below, or the boot splash — leaves a
+    // click nothing to land on. Refilled into a local as the panels draw and
+    // stored back after `data`'s read guard is dropped at the end, the same
+    // point `help::draw` needs `app` mutably.
+    app.hit = HitMap::default();
+
     if area.width < 80 || area.height < 24 {
         let msg = Paragraph::new(format!(
             "nadir needs at least 80x24 — this terminal is {}x{}.\nResize, or press q to quit.",
@@ -134,6 +153,8 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
         return;
     }
 
+    let mut hit = HitMap::default();
+
     let sat_state = data
         .tle
         .get()
@@ -159,6 +180,7 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
         ])
         .areas(area);
         title_bar(frame, title, app, &data);
+        hit.panels.push((body, Panel::Map));
         // Fullscreen mode never swaps in the sky plot, even with a pass
         // highlighted in Passes — `m` is "always the map, just bigger", not a
         // second way to reach the plot. `b`'s globe toggle isn't that kind of
@@ -204,6 +226,14 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
             Layout::horizontal([Constraint::Length(40), Constraint::Min(0)]).areas(bottom);
 
         title_bar(frame, title, app, &data);
+        hit.panels.extend([
+            (map_area, Panel::Map),
+            (tracked, Panel::Tracked),
+            (telem, Panel::Telemetry),
+            (passes, Panel::Passes),
+            (weather, Panel::Weather),
+            (launches, Panel::Launches),
+        ]);
         // While NEXT PASSES holds focus the map pane shows a sky plot of the
         // highlighted pass instead of the world map — the same "a highlight
         // over here draws something over there" idiom the pad marker uses,
@@ -220,11 +250,14 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
             _ if app.globe => globe::draw(frame, map_area, app, sat_state.as_ref(), now, reveal),
             _ => map::draw(frame, map_area, app, sat_state.as_ref(), now, pad, aurora, reveal),
         }
-        panels::tracked::draw(frame, tracked, app);
+        let rows = panels::tracked::draw(frame, tracked, app);
+        hit.add_rows(Panel::Tracked, rows);
         panels::telemetry::draw(frame, telem, app, sat_state.as_ref(), data.tle.get().is_some(), now);
-        panels::passes::draw(frame, passes, app, sat_state.as_ref(), now);
+        let rows = panels::passes::draw(frame, passes, app, sat_state.as_ref(), now);
+        hit.add_rows(Panel::Passes, rows);
         panels::weather::draw(frame, weather, app, &data, now);
-        panels::launches::draw(frame, launches, app, &data, wall_now);
+        let rows = panels::launches::draw(frame, launches, app, &data, wall_now);
+        hit.add_rows(Panel::Launches, rows);
         status_bar(frame, status, app, &data);
     }
 
@@ -246,6 +279,7 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
     }
 
     drop(data);
+    app.hit = hit;
     if app.show_help {
         help::draw(frame, area, app);
     }
@@ -371,7 +405,11 @@ fn title_bar(frame: &mut Frame, area: Rect, app: &App, data: &crate::app::AppDat
     // the NEXT PASSES title) shrinks the name to fit, or omits it below a
     // budget too small to say anything useful.
     const GAP: usize = 2;
-    const PREFIX: &str = " nadir  ";
+    // The badge plus the one-column gap after it — derived from the shared
+    // `hit::BADGE` rather than spelled out again, so the width this budgets
+    // and the width a click on the badge is tested against are the same
+    // string's length and cannot drift apart.
+    const PREFIX_W: usize = hit::BADGE_W as usize + 1;
     let right_full =
         coords_full.chars().count() + up_full.chars().count() + marker_w + clock.chars().count() + 1;
 
@@ -387,7 +425,7 @@ fn title_bar(frame: &mut Frame, area: Rect, app: &App, data: &crate::app::AppDat
             let base = format!("{} · NORAD {}", t.name(), t.norad_id());
             match t.international_designator() {
                 Some(id)
-                    if PREFIX.chars().count() + base.chars().count() + " · ".chars().count()
+                    if PREFIX_W + base.chars().count() + " · ".chars().count()
                         + id.chars().count()
                         + right_full
                         + GAP
@@ -401,7 +439,7 @@ fn title_bar(frame: &mut Frame, area: Rect, app: &App, data: &crate::app::AppDat
         None => format!("NORAD {} · acquiring…", app.config.sat),
     };
 
-    let left_len = PREFIX.chars().count() + sat.chars().count();
+    let left_len = PREFIX_W + sat.chars().count();
 
     // Once the id and the name have already gone, the scrub marker still has to
     // fit: drop the session-uptime field to a single space, then coarsen the
@@ -443,7 +481,7 @@ fn title_bar(frame: &mut Frame, area: Rect, app: &App, data: &crate::app::AppDat
     };
 
     let left = Line::from(vec![
-        Span::styled(" nadir ", Style::new().fg(Color::Black).bg(Theme::ACCENT).bold()),
+        Span::styled(hit::BADGE, Style::new().fg(Color::Black).bg(Theme::ACCENT).bold()),
         Span::raw(" "),
         Span::styled(sat, Style::new().fg(Theme::VALUE).add_modifier(Modifier::BOLD)),
     ]);
@@ -457,6 +495,13 @@ fn title_bar(frame: &mut Frame, area: Rect, app: &App, data: &crate::app::AppDat
     ]);
     frame.render_widget(Paragraph::new(left), area);
     frame.render_widget(Paragraph::new(right).alignment(Alignment::Right), area);
+
+    // The badge easter egg, painted over the finished bar. Called from here
+    // rather than from `draw` so both layouts — each of which calls this
+    // function — get it without either having to remember to.
+    if let Some(at) = app.egg {
+        egg::draw(frame.buffer_mut(), area, at.elapsed());
+    }
 }
 
 fn status_bar(frame: &mut Frame, area: Rect, app: &App, data: &crate::app::AppData) {
