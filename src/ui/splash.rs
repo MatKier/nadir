@@ -55,7 +55,7 @@ const NADIR_WORDMARK: [&str; 3] = [
 /// The release codename shown next to the version on the boot splash. Bump
 /// it alongside the version in `Cargo.toml` on a release, the same way a
 /// changelog heading would.
-const RELEASE_NAME: &str = "Station-Keeping";
+const RELEASE_NAME: &str = "Rendezvous";
 
 /// How wide the splash's dotted leader column is, `label` padded up to it —
 /// wide enough for "ground station" (14 chars, the longest of
