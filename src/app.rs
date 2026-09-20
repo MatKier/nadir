@@ -384,9 +384,22 @@ impl App {
 
     /// Switch focus to `panel`, resetting list scroll — a scroll position
     /// from a different list would be meaningless here.
+    ///
+    /// TRACKED starts on the satellite being tracked rather than the top: the
+    /// unfocused panel is already scrolled to show that row (the list is
+    /// name-sorted, so it is not always first), and starting at 0 would snap
+    /// the view away from it the moment focus arrives.
     fn set_focus(&mut self, panel: Panel) {
         self.focus = panel;
-        self.list_pos = 0;
+        self.list_pos = match panel {
+            Panel::Tracked => self
+                .config
+                .tracked
+                .iter()
+                .position(|t| t.norad_id == self.config.sat)
+                .unwrap_or(0),
+            _ => 0,
+        };
     }
 
     /// Zoom the follow window one step tighter. When not following, this turns
@@ -866,16 +879,13 @@ impl App {
                 .unwrap_or_else(|| format!("NORAD {norad_id}"))
         });
 
-        // Re-selecting the satellite already at the front of the tracked
-        // list, under the same name, is a genuine no-op — skip the reorder
-        // and the disk write so bouncing between two tracked entries with
-        // `Enter`/`Enter` doesn't hit the filesystem on every keypress.
+        // Re-selecting the satellite already being tracked, under the same
+        // name, is a genuine no-op. `track` itself is idempotent here (the
+        // list is name-sorted, so nothing would move), but the `save` at the
+        // bottom is not — skip it so bouncing on `Enter` doesn't hit the
+        // filesystem on every keypress.
         let already_current = norad_id == self.config.sat
-            && self
-                .config
-                .tracked
-                .first()
-                .is_some_and(|t| t.norad_id == norad_id && t.name == display_name);
+            && self.config.tracked_name(norad_id) == Some(display_name.as_str());
         if already_current {
             return;
         }
@@ -2222,8 +2232,8 @@ mod tests {
         config.sat = 25544;
         config.track(25544, "ISS (ZARYA)");
         config.track(20580, "HST");
-        // TRACKED lists most-recently-tracked first, so HST (list_pos 0) is
-        // removable but the active ISS (list_pos 1) is not.
+        // TRACKED is name-sorted, so HST (list_pos 0) is removable but the
+        // active ISS (list_pos 1) is not.
         let mut app = test_app(config);
         app.list_pos = 1;
         app.remove_tracked();
@@ -2240,7 +2250,7 @@ mod tests {
         app.list_pos = 0;
         app.remove_tracked();
         assert_eq!(app.config.tracked.len(), 1);
-        assert_eq!(app.config.tracked[0].norad_id, 25544);
+        assert_eq!(app.config.tracked_name(25544), Some("ISS (ZARYA)"));
     }
 
     #[test]
@@ -2253,7 +2263,7 @@ mod tests {
         }
         app.switch_satellite(25544, Some("ISS (ZARYA)".to_string()));
         assert_eq!(app.config.sat, 25544);
-        assert_eq!(app.config.tracked[0].name, "ISS (ZARYA)");
+        assert_eq!(app.config.tracked_name(25544), Some("ISS (ZARYA)"));
         // Reselecting the satellite already tracked must not wipe its
         // already-live element set.
         assert!(app.data.read().unwrap().tle.get().is_some());
@@ -2281,7 +2291,7 @@ mod tests {
         assert_eq!(app.config.sat, 20580);
         assert!(app.data.read().unwrap().tle.get().is_none(), "the old tracker must be cleared");
         assert!(app.passes.is_empty());
-        assert_eq!(app.config.tracked[0].norad_id, 20580);
+        assert_eq!(app.config.tracked_name(20580), Some("HST"));
     }
 
     /// A scratch cache directory `switch_satellite`'s warm start can read
@@ -2463,7 +2473,9 @@ mod tests {
         app.hit.panels.iter().find(|(_, p)| *p == panel).expect("panel was drawn").0
     }
 
-    /// An app with three tracked satellites, focused elsewhere, and one frame drawn.
+    /// An app with three tracked satellites, focused elsewhere, and one frame
+    /// drawn. The list is name-sorted — HST, ISS (ZARYA), NOAA 20 — and the
+    /// active satellite is the ISS, at index 1.
     fn drawn_app_with_tracked() -> App {
         let mut config = Config::default();
         config.track(25544, "ISS (ZARYA)");
@@ -2510,7 +2522,64 @@ mod tests {
         let r = panel_rect(&app, Panel::Tracked);
         click(&mut app, r.x + 3, y0);
         assert_eq!(app.focus, Panel::Tracked);
-        assert_eq!(app.list_pos, 2, "set_focus zeroes list_pos, so the row must land after it");
+        assert_eq!(app.list_pos, 2, "set_focus moves list_pos, so the row must land after it");
+    }
+
+    /// Six tracked satellites, the active one (ZZZ) sorting last, focused on
+    /// the map, one frame drawn — more entries than TRACKED has rows.
+    fn drawn_app_with_six_tracked_and_the_active_one_last() -> App {
+        let mut config = Config::default();
+        config.sat = 99;
+        for (id, name) in [(1, "AAA"), (2, "BBB"), (3, "CCC"), (4, "DDD"), (5, "EEE"), (99, "ZZZ")] {
+            config.track(id, name);
+        }
+        let mut app = test_app(config);
+        // Tracked is the default focus; the point here is the unfocused panel.
+        app.set_focus(Panel::Map);
+        draw_frame(&mut app, 140, 40);
+        app
+    }
+
+    #[test]
+    fn the_unfocused_tracked_panel_scrolls_the_active_satellite_into_view() {
+        let app = drawn_app_with_six_tracked_and_the_active_one_last();
+        assert_ne!(app.focus, Panel::Tracked);
+        let shown: Vec<usize> =
+            app.hit.rows.iter().filter(|r| r.0 == Panel::Tracked).map(|r| r.3).collect();
+        assert!(shown.contains(&5), "the ● satellite (index 5) must be on screen: {shown:?}");
+        assert!(shown[0] > 0, "…which means the list has scrolled: {shown:?}");
+    }
+
+    #[test]
+    fn clicking_the_top_row_of_a_scrolled_unfocused_list_selects_its_real_index() {
+        let mut app = drawn_app_with_six_tracked_and_the_active_one_last();
+        let first = app.hit.rows.iter().find(|r| r.0 == Panel::Tracked).unwrap();
+        let (y, index) = (first.1, first.3);
+        assert!(index > 0);
+        let r = panel_rect(&app, Panel::Tracked);
+        click(&mut app, r.x + 3, y);
+        assert_eq!(app.list_pos, index, "the list index, not the row's place on screen");
+    }
+
+    #[test]
+    fn focusing_tracked_starts_on_the_active_satellite_not_the_top() {
+        let mut app = drawn_app_with_six_tracked_and_the_active_one_last();
+        press(&mut app, '2');
+        assert_eq!(app.focus, Panel::Tracked);
+        assert_eq!(app.list_pos, 5);
+    }
+
+    #[test]
+    fn tracking_a_row_from_the_list_leaves_the_list_order_alone() {
+        let mut app = drawn_app_with_six_tracked_and_the_active_one_last();
+        let before: Vec<u64> = app.config.tracked.iter().map(|t| t.norad_id).collect();
+        app.set_focus(Panel::Tracked);
+        app.list_pos = 2;
+        app.track_selected();
+        assert_eq!(app.config.sat, 3);
+        let after: Vec<u64> = app.config.tracked.iter().map(|t| t.norad_id).collect();
+        assert_eq!(after, before, "no promotion to the front");
+        assert_eq!(app.config.tracked[app.list_pos].norad_id, 3, "the cursor is still on it");
     }
 
     fn tracked_row_y(app: &App, index: usize) -> (u16, u16) {
@@ -2521,9 +2590,9 @@ mod tests {
     #[test]
     fn double_clicking_a_tracked_entry_starts_tracking_it() {
         let mut app = drawn_app_with_tracked();
-        let (x, y) = tracked_row_y(&app, 1);
-        let target = app.config.tracked[1].norad_id;
-        assert_ne!(app.config.sat, target);
+        let (x, y) = tracked_row_y(&app, 0);
+        let target = app.config.tracked[0].norad_id;
+        assert_ne!(app.config.sat, target, "row 0 is HST; the ISS (row 1) is already active");
         click(&mut app, x, y);
         assert_ne!(app.config.sat, target, "one click only selects");
         click(&mut app, x, y);

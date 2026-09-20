@@ -185,9 +185,9 @@ tracked, by name or NORAD id:
   lists every match — pick one with `↑`/`↓` and `Enter`. A NORAD id tracks the
   object directly.
 
-Satellites you have tracked stay in the **TRACKED** panel (`2`), most recently
-tracked first, so returning to one does not mean searching again: highlight it
-and press `Enter`. `d` drops an entry; the satellite currently being tracked
+Satellites you have tracked stay in the **TRACKED** panel (`2`), sorted by
+name, so returning to one does not mean searching again: highlight it and press
+`Enter`. `d` drops an entry; the satellite currently being tracked
 cannot be dropped.
 
 When a satellite is first tracked, nadir does a one-shot lookup on
@@ -271,8 +271,8 @@ The full glossary — map symbols, every telemetry field and space-weather term,
 and what each status chip means — is available in-app by pressing `?`. The short
 version:
 
-**Tracked** — satellites you have tracked, most recently tracked first; `●`
-marks the current one.
+**Tracked** — satellites you have tracked, sorted by name; `●` marks the
+current one.
 
 **Telemetry** — `ALT` altitude above the WGS-84 ellipsoid · `SPD` inertial speed
 from SGP4, not ground-relative · `POS` sub-satellite lat/lon · `FOOT` radius of

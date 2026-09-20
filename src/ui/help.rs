@@ -182,8 +182,8 @@ fn content(app: &App) -> Vec<Line<'static>> {
     blank(&mut l);
 
     heading(&mut l, "Tracked");
-    text(&mut l, "Every satellite ever tracked, most recently (re)tracked first —");
-    text(&mut l, "picked with `Enter`, dropped with `d`.");
+    text(&mut l, "Every satellite ever tracked, sorted by name — picked with");
+    text(&mut l, "`Enter`, dropped with `d`.");
     row(&mut l, "●", "the satellite currently being tracked");
     text(&mut l, "The active satellite can't be dropped from the list — switch to");
     text(&mut l, "something else first.");

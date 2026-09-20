@@ -164,6 +164,10 @@ into `App::run`'s startup sequence the same way.
   use `Config::default()`, whose `path` is empty, and must not call `save()`.
 - User-facing documentation lives in two places that have to agree: `README.md`
   and the `?` overlay in `src/ui/help.rs`.
+- `Config::tracked` is kept sorted by name (`sort_tracked`, run by `track` and
+  `load`), not most-recent-first — don't reintroduce `insert(0, …)`. Row
+  indices from the hit map index it directly, so the order is stored, never
+  applied at render time.
 - `Config::track` is called every frame by `App::sync_tracked_name`, and it
   lifts the existing `TrackedSat` out and puts it back rather than rebuilding
   it — any per-satellite field added to `TrackedSat` (like `active_transmitter`)

@@ -328,8 +328,8 @@ pub struct Config {
     /// NORAD catalogue number of the satellite to track.
     #[serde(default = "default_sat")]
     pub sat: u64,
-    /// Every satellite ever tracked, most recently (re)tracked first. Shown
-    /// in the TRACKED panel so one can be picked again without searching.
+    /// Every satellite ever tracked, sorted by name (see `tracked_sort_key`).
+    /// Shown in the TRACKED panel so one can be picked again without searching.
     #[serde(default)]
     pub tracked: Vec<TrackedSat>,
     /// Whether nadir may use IP geolocation when no location is set.
@@ -391,6 +391,15 @@ pub struct Config {
     cache: Option<Cache>,
 }
 
+/// Sort key for the TRACKED list: name, case-insensitively, with the
+/// catalogue number breaking ties so the order is total and stable across
+/// runs. Trailing digits sort as text — `NOAA 15` lands before `NOAA 2` —
+/// which is what "alphabetical" means here; a natural/numeric comparator
+/// would be a different, larger promise.
+fn tracked_sort_key(t: &TrackedSat) -> (String, u64) {
+    (t.name.to_lowercase(), t.norad_id)
+}
+
 fn default_sat() -> u64 {
     DEFAULT_SAT
 }
@@ -450,6 +459,9 @@ impl Config {
             .with_context(|| format!("parsing config file {}", path.display()))?;
         cfg.path = path;
         cfg.is_new = false;
+        // A file written before the list was name-sorted is in most-recently-
+        // tracked order; fix it now so the first frame is already sorted.
+        cfg.sort_tracked();
         Ok(cfg)
     }
 
@@ -524,9 +536,17 @@ impl Config {
         }
     }
 
-    /// Record a satellite as tracked, most recently (re)tracked first. An
-    /// existing entry for the same object is updated in place and moved to
-    /// the front, rather than duplicated.
+    /// Put `tracked` in name order. Called by `track` and `load` — one
+    /// definition of "sorted", so a hand-edited or pre-sorting config file
+    /// heals itself rather than the two paths drifting apart.
+    pub(crate) fn sort_tracked(&mut self) {
+        self.tracked.sort_by_key(tracked_sort_key);
+    }
+
+    /// Record a satellite as tracked. An existing entry for the same object is
+    /// updated in place rather than duplicated, and the list stays sorted by
+    /// name — so re-tracking never reshuffles the TRACKED panel under the
+    /// cursor, unless the name itself changed.
     ///
     /// The existing entry is *lifted out and put back*, not rebuilt: everything
     /// it carries beyond the name — which transmitter is active — is
@@ -543,7 +563,8 @@ impl Config {
             None => TrackedSat { norad_id, name: String::new(), active_transmitter: 0 },
         };
         entry.name = name;
-        self.tracked.insert(0, entry);
+        self.tracked.push(entry);
+        self.sort_tracked();
     }
 
     /// The downlink frequencies on file for `norad_id`; empty if none have
@@ -640,24 +661,67 @@ fn transmitters_cache_key(norad_id: u64) -> String {
 mod tests {
     use super::*;
 
-    #[test]
-    fn track_adds_a_new_entry_at_the_front() {
-        let mut c = Config::default();
-        c.track(25544, "ISS (ZARYA)");
-        c.track(20580, "HST");
-        assert_eq!(c.tracked[0].norad_id, 20580);
-        assert_eq!(c.tracked[1].norad_id, 25544);
+    fn ids(c: &Config) -> Vec<u64> {
+        c.tracked.iter().map(|t| t.norad_id).collect()
     }
 
     #[test]
-    fn track_moves_an_existing_entry_to_the_front_and_updates_its_name() {
+    fn track_keeps_the_list_sorted_by_name_not_by_recency() {
+        let mut c = Config::default();
+        c.track(43013, "NOAA 20");
+        c.track(25544, "ISS (ZARYA)");
+        c.track(20580, "HST");
+        assert_eq!(ids(&c), [20580, 25544, 43013], "HST, ISS, NOAA — not most-recent-first");
+    }
+
+    #[test]
+    fn sorting_ignores_case_and_breaks_name_ties_by_norad_id() {
+        let mut c = Config::default();
+        c.track(1, "STARLINK-2");
+        c.track(2, "hst");
+        c.track(3, "COSMOS 2251");
+        c.track(9, "ISS");
+        c.track(4, "ISS");
+        assert_eq!(ids(&c), [3, 2, 4, 9, 1], "hst sits between COSMOS and ISS; ISS twins by id");
+    }
+
+    #[test]
+    fn re_tracking_does_not_duplicate_and_re_sorts_to_the_new_name() {
         let mut c = Config::default();
         c.track(25544, "NORAD 25544");
         c.track(20580, "HST");
-        c.track(25544, "ISS (ZARYA)");
+        // The placeholder name sorts after HST; the real one sorts before it.
+        assert_eq!(ids(&c), [20580, 25544]);
+        c.track(25544, "AAA ISS (ZARYA)");
         assert_eq!(c.tracked.len(), 2, "re-tracking must not duplicate the entry");
-        assert_eq!(c.tracked[0].norad_id, 25544);
-        assert_eq!(c.tracked[0].name, "ISS (ZARYA)");
+        assert_eq!(ids(&c), [25544, 20580]);
+        assert_eq!(c.tracked_name(25544), Some("AAA ISS (ZARYA)"));
+    }
+
+    #[test]
+    fn re_tracking_under_an_unchanged_name_does_not_move_anything() {
+        let mut c = Config::default();
+        c.track(25544, "ISS (ZARYA)");
+        c.track(20580, "HST");
+        c.track(43013, "NOAA 20");
+        let before = c.tracked.clone();
+        c.track(25544, "ISS (ZARYA)");
+        assert_eq!(c.tracked, before);
+    }
+
+    #[test]
+    fn sort_tracked_reorders_a_list_saved_in_most_recent_first_order() {
+        // What `load` sees from a config.toml written before the list was
+        // name-sorted; `load` calls `sort_tracked`, and this covers it without
+        // a temp file (unit tests must not touch the real config path).
+        let mut c: Config = toml::from_str(
+            "[[tracked]]\nnorad_id = 43013\nname = \"NOAA 20\"\n\
+             [[tracked]]\nnorad_id = 25544\nname = \"ISS (ZARYA)\"\n\
+             [[tracked]]\nnorad_id = 20580\nname = \"HST\"\n",
+        )
+        .unwrap();
+        c.sort_tracked();
+        assert_eq!(ids(&c), [20580, 25544, 43013]);
     }
 
     fn tx(hz: u64, mode: &str) -> Transmitter {
@@ -676,7 +740,7 @@ mod tests {
         c.set_transmitters(25544, vec![tx(145_800_000, "FM"), tx(437_800_000, "FSK")], 1);
         c.track(25544, "ISS (ZARYA)");
         assert_eq!(c.active_transmitter(25544).map(|t| t.downlink_hz), Some(437_800_000));
-        assert_eq!(c.tracked[0].name, "ISS (ZARYA)");
+        assert_eq!(c.tracked_name(25544), Some("ISS (ZARYA)"));
     }
 
     /// `--offline` is a per-launch flag like `--no-splash`, never a setting:
